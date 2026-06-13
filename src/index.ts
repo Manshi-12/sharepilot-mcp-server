@@ -58,11 +58,15 @@ function createMcpServer(): Server {
           throw new Error(`Unknown tool: ${name}`);
       }
     } catch (err: any) {
+      const graphError = err?.response?.data
+        ? JSON.stringify(err.response.data)
+        : err.message || String(err);
+      const status = err?.response?.status ? ` (HTTP ${err.response.status})` : "";
       return {
         content: [
           {
             type: "text",
-            text: `Error executing tool "${name}": ${err.message || String(err)}`,
+            text: `Error executing tool "${name}"${status}: ${graphError}`,
           },
         ],
         isError: true,
