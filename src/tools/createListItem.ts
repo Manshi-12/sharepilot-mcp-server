@@ -21,6 +21,9 @@ const FIELD_NAME_MAP: Record<string, string> = {
   "title": "Title",
 };
 
+// Checkbox-style choice fields must be sent as arrays
+const CHECKBOX_FIELDS = new Set(["field_2", "field_3", "field_9", "field_10"]);
+
 const VALID_CHOICES: Record<string, string[]> = {
   "field_2": ["Not started", "In-Progress", "Completed", "Blocked"],
   "field_3": ["High", "Medium", "Low"],
@@ -81,20 +84,22 @@ export async function createListItem(listName: string, fields: Record<string, an
     listId = found.id;
   }
 
-  // Map display names → internal field names
   const mappedFields: Record<string, any> = {};
   for (const [key, value] of Object.entries(fields)) {
     const internalName = FIELD_NAME_MAP[key.toLowerCase()] || key;
-    mappedFields[internalName] = value;
-  }
 
-  // Validate choice fields
-  for (const [fieldName, value] of Object.entries(mappedFields)) {
-    if (VALID_CHOICES[fieldName] && !VALID_CHOICES[fieldName].includes(value)) {
-      throw new Error(
-        `Invalid value "${value}" for field "${fieldName}". ` +
-        `Valid options: ${VALID_CHOICES[fieldName].join(", ")}`
-      );
+    if (VALID_CHOICES[internalName]) {
+      const validOpts = VALID_CHOICES[internalName];
+      const strValue = String(value);
+      if (!validOpts.includes(strValue)) {
+        throw new Error(
+          `Invalid value "${strValue}" for field "${key}". Valid options: ${validOpts.join(", ")}`
+        );
+      }
+      // Checkbox-style fields need array format
+      mappedFields[internalName] = CHECKBOX_FIELDS.has(internalName) ? [strValue] : strValue;
+    } else {
+      mappedFields[internalName] = value;
     }
   }
 
