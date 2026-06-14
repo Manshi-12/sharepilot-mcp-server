@@ -14,7 +14,7 @@ function getConfidentialClient(): ConfidentialClientApplication {
   if (!TENANT_ID || !CLIENT_ID || !CLIENT_SECRET) {
     throw new Error(
       "Missing TENANT_ID, CLIENT_ID or CLIENT_SECRET environment variables. " +
-        "Set these in .env (local) or Application Settings (Azure App Service)."
+      "Set these in .env (local) or Application Settings (Azure App Service)."
     );
   }
 
