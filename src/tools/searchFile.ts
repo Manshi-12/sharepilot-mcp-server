@@ -2,11 +2,17 @@ import { getGraphClient } from "../auth/graphClient.js";
 
 const SITE_ID = process.env.SITE_ID || "";
 
+const KNOWN_DRIVES: Record<string, string> = {
+  "company knowledge base": "b!_QyOrq2LXkiz1turmiRqpReoxLAcnd5AqBzBOABhT83c0dgJ0DkPQqqH8PQDZMHP",
+  "documents": "b!_QyOrq2LXkiz1turmiRqpReoxLAcnd5AqBzBOABhT807pG5Xm1gIR4AxoEnqyICJ",
+};
+
 export const searchFileToolSchema = {
   name: "search_file",
   description:
-    "Searches a specific Document Library on the SharePoint site for a file by name. " +
-    "Can search any library on the site. Returns file metadata including id and driveId needed for read_file.",
+    "Searches a Document Library on the SharePoint site for a file by name. " +
+    "Available libraries: 'Company Knowledge Base', 'Documents'. " +
+    "Returns file metadata including id and driveId needed for read_file.",
   inputSchema: {
     type: "object",
     properties: {
@@ -16,7 +22,7 @@ export const searchFileToolSchema = {
       },
       libraryName: {
         type: "string",
-        description: "Name of the Document Library to search in, e.g. 'Company Knowledge Base', 'Documents'. If not specified, searches all libraries.",
+        description: "Name of the Document Library: 'Company Knowledge Base' or 'Documents'. If not specified, searches all libraries.",
       },
     },
     required: ["filename"],
@@ -26,19 +32,26 @@ export const searchFileToolSchema = {
 export async function searchFile(filename: string, libraryName?: string) {
   const client = await getGraphClient();
 
-  const drivesRes = await client.get(`/sites/${SITE_ID}/drives`);
-  const drives = drivesRes.data.value || [];
+  let driveEntries: { name: string; id: string }[] = [];
 
-  const targetDrives = libraryName
-    ? drives.filter((d: any) =>
-        d.name.toLowerCase() === libraryName.toLowerCase() ||
-        d.name.toLowerCase().replace(/\s/g, "") === libraryName.toLowerCase().replace(/\s/g, "")
-      )
-    : drives;
+  if (libraryName) {
+    const key = libraryName.toLowerCase();
+    const driveId = KNOWN_DRIVES[key];
+    if (driveId) {
+      driveEntries = [{ name: libraryName, id: driveId }];
+    } else {
+      const drivesRes = await client.get(`/sites/${SITE_ID}/drives`);
+      const drives = drivesRes.data.value || [];
+      const found = drives.find((d: any) => d.name.toLowerCase() === key);
+      if (found) driveEntries = [{ name: found.name, id: found.id }];
+    }
+  } else {
+    driveEntries = Object.entries(KNOWN_DRIVES).map(([name, id]) => ({ name, id }));
+  }
 
   const allFiles: any[] = [];
 
-  for (const drive of targetDrives) {
+  for (const drive of driveEntries) {
     try {
       const searchRes = await client.get(
         `/drives/${drive.id}/root/search(q='${encodeURIComponent(filename)}')`
