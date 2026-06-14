@@ -17,22 +17,13 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 function createMcpServer(): Server {
   const server = new Server(
-    {
-      name: "sharepilot-mcp-server",
-      version: "0.1.0",
-    },
-    {
-      capabilities: {
-        tools: {},
-      },
-    }
+    { name: "sharepilot-mcp-server", version: "0.1.0" },
+    { capabilities: { tools: {} } }
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-      tools: [searchFileToolSchema, readFileToolSchema, createListItemToolSchema],
-    };
-  });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [searchFileToolSchema, readFileToolSchema, createListItemToolSchema],
+  }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
@@ -40,20 +31,26 @@ function createMcpServer(): Server {
     try {
       switch (name) {
         case "search_file": {
-          const result = await searchFile((args as any).filename);
+          const result = await searchFile(
+            (args as any).filename,
+            (args as any).libraryName
+          );
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
-
         case "read_file": {
-          const result = await readFile((args as any).fileId);
+          const result = await readFile(
+            (args as any).fileId,
+            (args as any).driveId
+          );
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
-
         case "create_list_item": {
-          const result = await createListItem(args as any);
+          const result = await createListItem(
+            (args as any).listName,
+            (args as any).fields
+          );
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
-
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
@@ -63,12 +60,7 @@ function createMcpServer(): Server {
         : err.message || String(err);
       const status = err?.response?.status ? ` (HTTP ${err.response.status})` : "";
       return {
-        content: [
-          {
-            type: "text",
-            text: `Error executing tool "${name}"${status}: ${graphError}`,
-          },
-        ],
+        content: [{ type: "text", text: `Error executing tool "${name}"${status}: ${graphError}` }],
         isError: true,
       };
     }
@@ -91,12 +83,7 @@ async function main() {
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
       });
-
-      res.on("close", () => {
-        transport.close();
-        server.close();
-      });
-
+      res.on("close", () => { transport.close(); server.close(); });
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (err: any) {
@@ -112,7 +99,7 @@ async function main() {
   });
 
   app.get("/mcp", (_req, res) => {
-    res.status(405).json({ error: "Method not allowed in stateless mode" });
+    res.status(405).json({ error: "Method not allowed" });
   });
 
   app.listen(PORT, () => {
@@ -122,6 +109,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("Fatal error in SharePilot MCP server:", err);
+  console.error("Fatal error:", err);
   process.exit(1);
 });

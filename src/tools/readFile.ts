@@ -3,15 +3,14 @@ import { getGraphClient } from "../auth/graphClient.js";
 export const readFileToolSchema = {
   name: "read_file",
   description:
-    "Downloads a file from the 'Company Knowledge Base' SharePoint Document Library by its " +
-    "file ID and returns its content/metadata for further extraction by the AI agent. " +
-    "Use search_file first to obtain the fileId and driveId.",
+    "Reads a file from a SharePoint Document Library and returns its metadata and download URL. " +
+    "Use search_file first to get the fileId and driveId. Works with any library on the site.",
   inputSchema: {
     type: "object",
     properties: {
       fileId: {
         type: "string",
-        description: "The SharePoint drive item ID of the file to read (from search_file result).",
+        description: "The SharePoint drive item ID of the file (from search_file result).",
       },
       driveId: {
         type: "string",
