@@ -22,8 +22,16 @@ export const searchFileToolSchema = {
 export async function searchFile(filename: string) {
   const client = await getGraphClient();
 
-  const driveRes = await client.get(`/sites/${SITE_ID}/drive`);
-  const driveId = driveRes.data.id;
+  const drivesRes = await client.get(`/sites/${SITE_ID}/drives`);
+  const drives = drivesRes.data.value || [];
+
+  const targetDrive = drives.find(
+    (d: any) =>
+      d.name === "Company Knowledge Base" ||
+      d.name === "CompanyKnowledgeBase"
+  ) || drives[0];
+
+  const driveId = targetDrive.id;
 
   const searchRes = await client.get(
     `/drives/${driveId}/root/search(q='${encodeURIComponent(filename)}')`
@@ -35,6 +43,7 @@ export async function searchFile(filename: string) {
     webUrl: item.webUrl,
     lastModifiedDateTime: item.lastModifiedDateTime,
     size: item.size,
+    driveId: driveId,
   }));
 
   return {
