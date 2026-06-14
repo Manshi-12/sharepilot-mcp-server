@@ -21,6 +21,13 @@ const FIELD_NAME_MAP: Record<string, string> = {
   "title": "Title",
 };
 
+const VALID_CHOICES: Record<string, string[]> = {
+  "field_2": ["Not started", "In-Progress", "Completed", "Blocked"],
+  "field_3": ["High", "Medium", "Low"],
+  "field_9": ["Development", "Testing", "Design", "Documentation", "Meeting"],
+  "field_10": ["IT", "HR", "Finance", "Marketing", "Operations"],
+};
+
 const KNOWN_LISTS: Record<string, string> = {
   "project tasks": "066a3b58-72a3-4fba-a3fc-3acae90be4bf",
 };
@@ -28,13 +35,13 @@ const KNOWN_LISTS: Record<string, string> = {
 export const createListItemToolSchema = {
   name: "create_list_item",
   description:
-    "Creates a new item/row in a SharePoint List on the site. " +
-    "For 'Project Tasks' list, use these field names: " +
-    "Title, Status, Priority, DueDate, Description, PercentComplete, IsApproved, TaskCategory, DepartmentName. " +
-    "Valid values — Priority: 'High'|'Medium'|'Low'. " +
-    "Status: 'Not started'|'In-Progress'|'Completed'|'Blocked'. " +
-    "DepartmentName: 'IT'|'HR'|'Finance'|'Marketing'|'Operations'. " +
-    "TaskCategory: 'Development'|'Testing'|'Design'|'Documentation'|'Meeting'.",
+    "Creates a new item/row in a SharePoint List. " +
+    "For 'Project Tasks' list use these fields: " +
+    "Title (text), Status ('Not started'|'In-Progress'|'Completed'|'Blocked'), " +
+    "Priority ('High'|'Medium'|'Low'), DueDate (YYYY-MM-DD), Description (text), " +
+    "PercentComplete (0-100), IsApproved (true/false), " +
+    "TaskCategory ('Development'|'Testing'|'Design'|'Documentation'|'Meeting'), " +
+    "DepartmentName ('IT'|'HR'|'Finance'|'Marketing'|'Operations').",
   inputSchema: {
     type: "object",
     properties: {
@@ -44,7 +51,7 @@ export const createListItemToolSchema = {
       },
       fields: {
         type: "object",
-        description: "Field name-value pairs. Use: Title, Status, Priority, DueDate, Description, PercentComplete, IsApproved, TaskCategory, DepartmentName.",
+        description: "Field name-value pairs using the field names described above.",
         additionalProperties: true,
       },
     },
@@ -74,11 +81,21 @@ export async function createListItem(listName: string, fields: Record<string, an
     listId = found.id;
   }
 
-  // Map display field names → internal SharePoint field names
+  // Map display names → internal field names
   const mappedFields: Record<string, any> = {};
   for (const [key, value] of Object.entries(fields)) {
     const internalName = FIELD_NAME_MAP[key.toLowerCase()] || key;
     mappedFields[internalName] = value;
+  }
+
+  // Validate choice fields
+  for (const [fieldName, value] of Object.entries(mappedFields)) {
+    if (VALID_CHOICES[fieldName] && !VALID_CHOICES[fieldName].includes(value)) {
+      throw new Error(
+        `Invalid value "${value}" for field "${fieldName}". ` +
+        `Valid options: ${VALID_CHOICES[fieldName].join(", ")}`
+      );
+    }
   }
 
   const res = await client.post(

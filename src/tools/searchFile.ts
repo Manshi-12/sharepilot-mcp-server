@@ -50,23 +50,42 @@ export async function searchFile(filename: string, libraryName?: string) {
   }
 
   const allFiles: any[] = [];
+  const searchLower = filename.toLowerCase();
 
   for (const drive of driveEntries) {
     try {
-      const searchRes = await client.get(
-        `/drives/${drive.id}/root/search(q='${encodeURIComponent(filename)}')`
-      );
-      const items = (searchRes.data.value || []).map((item: any) => ({
-        id: item.id,
-        name: item.name,
-        webUrl: item.webUrl,
-        lastModifiedDateTime: item.lastModifiedDateTime,
-        size: item.size,
-        driveId: drive.id,
-        libraryName: drive.name,
-      }));
+      // List all files in root, filter by name client-side
+      const listRes = await client.get(`/drives/${drive.id}/root/children`);
+      const items = (listRes.data.value || [])
+        .filter((item: any) => item.name?.toLowerCase().includes(searchLower))
+        .map((item: any) => ({
+          id: item.id,
+          name: item.name,
+          webUrl: item.webUrl,
+          lastModifiedDateTime: item.lastModifiedDateTime,
+          size: item.size,
+          driveId: drive.id,
+          libraryName: drive.name,
+        }));
       allFiles.push(...items);
-    } catch (_) {}
+    } catch (e: any) {
+      // Fallback to search API
+      try {
+        const searchRes = await client.get(
+          `/drives/${drive.id}/root/search(q='${encodeURIComponent(filename)}')`
+        );
+        const items = (searchRes.data.value || []).map((item: any) => ({
+          id: item.id,
+          name: item.name,
+          webUrl: item.webUrl,
+          lastModifiedDateTime: item.lastModifiedDateTime,
+          size: item.size,
+          driveId: drive.id,
+          libraryName: drive.name,
+        }));
+        allFiles.push(...items);
+      } catch (_) {}
+    }
   }
 
   return { matchCount: allFiles.length, files: allFiles };
