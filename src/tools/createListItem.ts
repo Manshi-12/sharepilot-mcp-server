@@ -2,9 +2,9 @@ import { getGraphClient } from "../auth/graphClient.js";
 
 const SITE_ID = process.env.SITE_ID || "";
 
-// This map is ONLY for Project Tasks list where display names differ from internal names
-// For all other lists, we use the field name as-is and let SharePoint match it
+// Hardcoded map ONLY for Project Tasks (internal names differ from display names)
 const PROJECT_TASKS_FIELD_MAP: Record<string, string> = {
+  "title": "Title",
   "status": "field_2",
   "priority": "field_3",
   "duedate": "field_4",
@@ -20,8 +20,26 @@ const PROJECT_TASKS_FIELD_MAP: Record<string, string> = {
   "departmentname": "field_10",
   "department name": "field_10",
   "department": "field_10",
-  "title": "Title",
 };
+
+// System fields that SharePoint manages internally — never write to these
+const SYSTEM_FIELDS = new Set([
+  "ID", "Id", "id",
+  "ContentType", "ContentTypeId",
+  "Modified", "Created",
+  "Author", "AuthorId",
+  "Editor", "EditorId",
+  "AppAuthor", "AppAuthorId",
+  "AppEditor", "AppEditorId",
+  "_UIVersionString", "_UIVersion",
+  "Attachments", "Edit",
+  "LinkTitle", "LinkTitleNoMenu", "LinkFilename",
+  "DocIcon", "ItemChildCount", "FolderChildCount",
+  "_ColorTag", "ComplianceAssetId",
+  "_ComplianceFlags", "_ComplianceTag",
+  "_ComplianceTagWrittenTime", "_ComplianceTagUserId",
+  "_IsRecord",
+]);
 
 const KNOWN_LISTS: Record<string, string> = {
   "project tasks": "066a3b58-72a3-4fba-a3fc-3acae90be4bf",
@@ -31,9 +49,8 @@ export const createListItemToolSchema = {
   name: "create_list_item",
   description:
     "Creates a new item/row in ANY SharePoint List. " +
-    "For 'Project Tasks' list use these fields: " +
-    "Title (text, required), Description (text), DueDate (YYYY-MM-DD), " +
-    "PercentComplete (0-100), IsApproved (true/false), " +
+    "For 'Project Tasks' list, supported fields: " +
+    "Title (required), Description, DueDate (YYYY-MM-DD), PercentComplete (0-100), IsApproved (true/false), " +
     "Status ('Not started'|'In-Progress'|'Completed'|'Blocked'), " +
     "Priority ('High'|'Medium'|'Low'), " +
     "TaskCategory ('Development'|'Testing'|'Design'|'Documentation'|'Meeting'), " +
@@ -52,7 +69,7 @@ export const createListItemToolSchema = {
 export async function createListItem(listName: string, fields: Record<string, any>) {
   const client = await getGraphClient();
 
-  // ── 1. Resolve list ID ──────────────────────────────────────────────────────
+  // ── 1. Resolve list ID ───────────────────────────────────────────────────────
   const listKey = listName.toLowerCase();
   let listId = KNOWN_LISTS[listKey];
 
@@ -68,94 +85,110 @@ export async function createListItem(listName: string, fields: Record<string, an
     listId = found.id;
   }
 
-  // ── 2. Fetch real column definitions ────────────────────────────────────────
+  // ── 2. Fetch column schema — only writable, non-hidden columns ───────────────
   const colRes = await client.get(`/sites/${SITE_ID}/lists/${listId}/columns`);
   const columns: any[] = colRes.data.value || [];
 
-  // Build lookup: internalName → { displayAs, choices }
-  const colSchema: Record<string, { displayAs: string; choices: string[] }> = {};
-  for (const col of columns) {
+  // Only keep user-editable columns
+  const writableColumns = columns.filter(
+    (c: any) => !c.readOnly && !c.hidden && !SYSTEM_FIELDS.has(c.name)
+  );
+
+  // Map: internalName → choice schema
+  const choiceSchema: Record<string, { displayAs: string; choices: string[] }> = {};
+  for (const col of writableColumns) {
     if (col.choice) {
-      colSchema[col.name] = {
+      choiceSchema[col.name] = {
         displayAs: col.choice.displayAs || "dropDownMenu",
         choices: col.choice.choices || [],
       };
     }
   }
 
-  // Also build lookup: displayName.toLowerCase() → internalName
-  // So if user passes "Task Category" we find "field_9" or "TaskCategory"
+  // Map: displayName.toLowerCase() → internalName (only for writable columns)
   const displayToInternal: Record<string, string> = {};
-  for (const col of columns) {
+  for (const col of writableColumns) {
     displayToInternal[col.displayName.toLowerCase()] = col.name;
-    displayToInternal[col.name.toLowerCase()] = col.name; // also map internalName → itself
+    displayToInternal[col.name.toLowerCase()] = col.name;
   }
 
-  // ── 3. Map user-provided field names → correct internal names ───────────────
+  // ── 3. Map user fields → internal names, skip system fields ─────────────────
   const isProjectTasks = listKey === "project tasks";
-
   const mappedFields: Record<string, any> = {};
-  for (const [userKey, value] of Object.entries(fields)) {
-    let internalName: string;
 
+  for (const [userKey, value] of Object.entries(fields)) {
+    // Skip if user accidentally passed a system field
+    if (SYSTEM_FIELDS.has(userKey)) continue;
+
+    let internalName: string;
     if (isProjectTasks) {
-      // Use the hardcoded map for Project Tasks (field_2, field_3, etc.)
-      internalName = PROJECT_TASKS_FIELD_MAP[userKey.toLowerCase()] || userKey;
+      internalName = PROJECT_TASKS_FIELD_MAP[userKey.toLowerCase()] ?? userKey;
     } else {
-      // For all other lists: match by displayName or internalName from real schema
-      internalName = displayToInternal[userKey.toLowerCase()] || userKey;
+      internalName = displayToInternal[userKey.toLowerCase()] ?? userKey;
     }
 
-    // Check how this field expects its value
-    const schema = colSchema[internalName];
+    // Skip system fields even after mapping
+    if (SYSTEM_FIELDS.has(internalName)) continue;
+
+    // Apply correct format based on choice schema
+    const schema = choiceSchema[internalName];
     if (schema) {
       if (schema.displayAs === "checkBoxes") {
-        // checkBoxes = multi-select → MUST be array
-        mappedFields[internalName] = Array.isArray(value) ? value : [String(value)];
+        // Multi-select: MUST be array of strings
+        mappedFields[internalName] = Array.isArray(value)
+          ? value.map(String)
+          : [String(value)];
       } else {
-        // dropDownMenu = single-select → MUST be plain string
-        mappedFields[internalName] = Array.isArray(value) ? value[0] : String(value);
+        // Single-select (dropDownMenu): MUST be plain string, NOT array
+        mappedFields[internalName] = Array.isArray(value)
+          ? String(value[0])
+          : String(value);
       }
     } else {
-      // Not a choice field, send as-is
+      // Regular field: send as-is
       mappedFields[internalName] = value;
     }
   }
 
-  // ── 4. POST everything in one request ───────────────────────────────────────
+  // ── 4. POST all fields in one request ───────────────────────────────────────
   const res = await client.post(
     `/sites/${SITE_ID}/lists/${listId}/items`,
     { fields: mappedFields }
   );
   const itemId = res.data.id;
 
-  // ── 5. Read back to verify ──────────────────────────────────────────────────
+  // ── 5. Verify: read back what was actually saved ─────────────────────────────
   const verifyRes = await client.get(
     `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`
   );
   const saved = verifyRes.data;
 
-  // Build verified snapshot for only the fields the user tried to set
+  // Build verified map using user-friendly keys
   const verifiedFields: Record<string, any> = {};
   for (const [userKey] of Object.entries(fields)) {
+    if (SYSTEM_FIELDS.has(userKey)) continue;
+
     let internalName: string;
     if (isProjectTasks) {
-      internalName = PROJECT_TASKS_FIELD_MAP[userKey.toLowerCase()] || userKey;
+      internalName = PROJECT_TASKS_FIELD_MAP[userKey.toLowerCase()] ?? userKey;
     } else {
-      internalName = displayToInternal[userKey.toLowerCase()] || userKey;
+      internalName = displayToInternal[userKey.toLowerCase()] ?? userKey;
     }
+
     const raw = saved[internalName];
-    // Unwrap single-element arrays for clean display
-    verifiedFields[userKey] = Array.isArray(raw) && raw.length === 1 ? raw[0] : (raw ?? null);
+    verifiedFields[userKey] =
+      Array.isArray(raw) && raw.length === 1 ? raw[0] : (raw ?? null);
   }
 
   const missingFields = Object.entries(verifiedFields)
     .filter(([_, v]) => v === null || v === undefined || v === "")
     .map(([k]) => k);
 
+  const sharePointUrl = `https://dwivedimanshi12outlook.sharepoint.com/Lists/${listName.replace(/ /g, "%20")}/DispForm.aspx?ID=${itemId}`;
+
   return {
     id: itemId,
-    webUrl: `https://dwivedimanshi12outlook.sharepoint.com/Lists/${encodeURIComponent(listName.replace(/ /g, "%20"))}/DispForm.aspx?ID=${itemId}`,
+    webUrl: sharePointUrl,
     listName,
     status: missingFields.length === 0 ? "fully_created" : "partially_created",
     verifiedFields,
