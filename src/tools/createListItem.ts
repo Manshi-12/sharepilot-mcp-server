@@ -25,9 +25,6 @@ const KNOWN_LISTS: Record<string, string> = {
   "project tasks": "066a3b58-72a3-4fba-a3fc-3acae90be4bf",
 };
 
-// Choice fields that need special handling
-const CHOICE_FIELDS = new Set(["field_2", "field_3", "field_9", "field_10"]);
-
 export const createListItemToolSchema = {
   name: "create_list_item",
   description:
@@ -70,152 +67,154 @@ export async function createListItem(listName: string, fields: Record<string, an
         l.displayName?.toLowerCase() === listKey ||
         l.name?.toLowerCase() === listKey
     );
-    if (!found) {
-      throw new Error(
-        `List "${listName}" not found. Available: ${lists.map((l: any) => l.displayName).join(", ")}`
-      );
-    }
+    if (!found) throw new Error(`List "${listName}" not found.`);
     listId = found.id;
   }
 
-  // Map all friendly field names to internal SharePoint names
+  // Map friendly names to internal SharePoint field names
   const allMapped: Record<string, any> = {};
   for (const [key, value] of Object.entries(fields)) {
     const internalName = FIELD_NAME_MAP[key.toLowerCase()] || key;
     allMapped[internalName] = value;
   }
 
-  // Separate safe fields (go in POST) from choice fields (PATCH after)
-  const safeFields: Record<string, any> = {};
-  const choiceFields: Record<string, any> = {};
+  // --- STRATEGY: Send ALL fields together in the initial POST ---
+  // SharePoint accepts choice fields in the POST body directly.
+  // The two-step PATCH approach fails for checkbox-style choice fields.
+  try {
+    const res = await client.post(
+      `/sites/${SITE_ID}/lists/${listId}/items`,
+      { fields: allMapped }
+    );
 
-  for (const [key, value] of Object.entries(allMapped)) {
-    if (CHOICE_FIELDS.has(key)) {
-      choiceFields[key] = value;
-    } else {
-      safeFields[key] = value;
+    const itemId = res.data.id;
+
+    // Read back to verify what was actually saved
+    const verifyRes = await client.get(
+      `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`
+    );
+    const saved = verifyRes.data;
+
+    const verifiedFields = {
+      Title: saved.Title || null,
+      Status: saved.field_2 || null,
+      Priority: saved.field_3 || null,
+      DueDate: saved.field_4 || null,
+      Description: saved.field_5 || null,
+      PercentComplete: saved.field_6 ?? null,
+      TaskCategory: saved.field_9 || null,
+      DepartmentName: saved.field_10 || null,
+    };
+
+    const missingFields = Object.entries(verifiedFields)
+      .filter(([_, v]) => v === null || v === undefined)
+      .map(([k]) => k);
+
+    return {
+      id: itemId,
+      webUrl: `https://dwivedimanshi12outlook.sharepoint.com/Lists/Project%20Tasks/DispForm.aspx?ID=${itemId}`,
+      listName,
+      status: missingFields.length === 0 ? "fully_created" : "partially_created",
+      verifiedFields,
+      missingFields: missingFields.length > 0 ? missingFields : undefined,
+      note: missingFields.length > 0
+        ? `⚠️ These fields were not saved: ${missingFields.join(", ")}`
+        : "✅ All fields saved successfully.",
+    };
+
+  } catch (postErr: any) {
+    // If POST with all fields fails, fall back to safe fields only + PATCH approach
+    // but this time capture the EXACT error for each choice field
+    const postErrMsg = postErr?.response?.data?.error?.message || postErr?.message || String(postErr);
+    const postErrCode = postErr?.response?.data?.error?.code || "unknown";
+
+    // Try POST with only safe (non-choice) fields
+    const CHOICE_FIELDS = new Set(["field_2", "field_3", "field_9", "field_10"]);
+    const safeFields: Record<string, any> = {};
+    const choiceFields: Record<string, any> = {};
+
+    for (const [key, value] of Object.entries(allMapped)) {
+      if (CHOICE_FIELDS.has(key)) choiceFields[key] = value;
+      else safeFields[key] = value;
     }
-  }
 
-  // Step 1: POST to create the item with safe fields
-  const res = await client.post(
-    `/sites/${SITE_ID}/lists/${listId}/items`,
-    { fields: safeFields }
-  );
-  const itemId = res.data.id;
+    const res2 = await client.post(
+      `/sites/${SITE_ID}/lists/${listId}/items`,
+      { fields: safeFields }
+    );
+    const itemId = res2.data.id;
 
-  // Step 2: Get real column definitions so we use exact internal names
-  const colRes = await client.get(
-    `/sites/${SITE_ID}/lists/${listId}/columns?$select=name,displayName,type,choice`
-  );
-  const columns: any[] = colRes.data.value || [];
-
-  // Build a map: field_X -> { internalName, choices[] }
-  const choiceColMap: Record<string, { internalName: string; choices: string[] }> = {};
-  for (const col of columns) {
-    if (col.choice?.choices?.length > 0) {
-      choiceColMap[col.name] = {
-        internalName: col.name,
-        choices: col.choice.choices,
-      };
-    }
-  }
-
-  // Step 3: PATCH each choice field individually with validated value
-  const patchResults: Record<string, any> = {};
-
-  for (const [fieldName, value] of Object.entries(choiceFields)) {
-    const colInfo = choiceColMap[fieldName];
-
-    // Validate value against allowed choices
-    if (colInfo) {
-      const match = colInfo.choices.find(
-        (c: string) => c.toLowerCase() === String(value).toLowerCase()
-      );
-
-      if (!match) {
-        patchResults[fieldName] = {
-          attempted: value,
-          result: "error",
-          reason: `Value "${value}" not in allowed choices: [${colInfo.choices.join(", ")}]`,
-        };
-        continue;
-      }
-
-      // Use exactly-matched choice value (correct casing)
-      const exactValue = match;
-
-      // Try plain string PATCH
-      try {
-        await client.patch(
-          `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
-          { [fieldName]: exactValue }
-        );
-        patchResults[fieldName] = { attempted: exactValue, result: "success" };
-      } catch (e1: any) {
-        const err1 = e1?.response?.data?.error?.message || e1?.message || String(e1);
-        // Try array format
-        try {
-          await client.patch(
-            `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
-            { [fieldName]: [exactValue] }
-          );
-          patchResults[fieldName] = { attempted: [exactValue], result: "success" };
-        } catch (e2: any) {
-          const err2 = e2?.response?.data?.error?.message || e2?.message || String(e2);
-          patchResults[fieldName] = {
-            attempted: exactValue,
-            result: "error",
-            reason: `Plain string failed: "${err1}" | Array format failed: "${err2}"`,
-          };
-        }
-      }
-    } else {
-      // Column not found in schema, try anyway
+    // Try PATCH for each choice field and record exact error
+    const patchLog: Record<string, any> = {};
+    for (const [fieldName, value] of Object.entries(choiceFields)) {
+      // Attempt 1: plain string
       try {
         await client.patch(
           `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
           { [fieldName]: value }
         );
-        patchResults[fieldName] = { attempted: value, result: "success" };
-      } catch (e: any) {
-        patchResults[fieldName] = {
-          attempted: value,
-          result: "error",
-          reason: e?.response?.data?.error?.message || e?.message,
-        };
+        patchLog[fieldName] = { result: "success", value };
+        continue;
+      } catch (e1: any) {
+        const msg1 = e1?.response?.data?.error?.message || e1?.message;
+        const code1 = e1?.response?.data?.error?.code || "";
+
+        // Attempt 2: array
+        try {
+          await client.patch(
+            `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
+            { [fieldName]: [value] }
+          );
+          patchLog[fieldName] = { result: "success_as_array", value: [value] };
+          continue;
+        } catch (e2: any) {
+          const msg2 = e2?.response?.data?.error?.message || e2?.message;
+
+          // Attempt 3: object format { Value: "..." }
+          try {
+            await client.patch(
+              `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
+              { [fieldName]: { Value: value } }
+            );
+            patchLog[fieldName] = { result: "success_as_object", value: { Value: value } };
+            continue;
+          } catch (e3: any) {
+            const msg3 = e3?.response?.data?.error?.message || e3?.message;
+            patchLog[fieldName] = {
+              result: "ALL_ATTEMPTS_FAILED",
+              attempt1_string: msg1,
+              attempt2_array: msg2,
+              attempt3_object: msg3,
+            };
+          }
+        }
       }
     }
+
+    // Read back what was actually saved
+    const verifyRes = await client.get(
+      `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`
+    );
+    const saved = verifyRes.data;
+
+    return {
+      id: itemId,
+      webUrl: `https://dwivedimanshi12outlook.sharepoint.com/Lists/Project%20Tasks/DispForm.aspx?ID=${itemId}`,
+      listName,
+      status: "partially_created",
+      initialPostError: { code: postErrCode, message: postErrMsg },
+      verifiedFields: {
+        Title: saved.Title || null,
+        Status: saved.field_2 || null,
+        Priority: saved.field_3 || null,
+        DueDate: saved.field_4 || null,
+        Description: saved.field_5 || null,
+        PercentComplete: saved.field_6 ?? null,
+        TaskCategory: saved.field_9 || null,
+        DepartmentName: saved.field_10 || null,
+      },
+      choicePatchLog: patchLog,
+      note: "⚠️ Initial POST with all fields failed. Fell back to safe-fields POST + per-field PATCH. See choicePatchLog for exact errors.",
+    };
   }
-
-  // Step 4: Read back what was actually saved
-  const verifyRes = await client.get(
-    `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`
-  );
-  const saved = verifyRes.data;
-
-  const verifiedFields = {
-    Title: saved.Title || null,
-    Status: saved.field_2 || null,
-    Priority: saved.field_3 || null,
-    DueDate: saved.field_4 || null,
-    Description: saved.field_5 || null,
-    PercentComplete: saved.field_6 || null,
-    TaskCategory: saved.field_9 || null,
-    DepartmentName: saved.field_10 || null,
-  };
-
-  const failedFields = Object.entries(patchResults)
-    .filter(([_, v]) => v.result === "error")
-    .map(([k, v]) => `${k}: ${v.reason}`);
-
-  return {
-    id: itemId,
-    webUrl: `https://dwivedimanshi12outlook.sharepoint.com/Lists/Project%20Tasks/DispForm.aspx?ID=${itemId}`,
-    listName,
-    status: failedFields.length === 0 ? "fully_created" : "partially_created",
-    verifiedFields,
-    choiceFieldResults: patchResults,
-    errors: failedFields.length > 0 ? failedFields : undefined,
-  };
 }
