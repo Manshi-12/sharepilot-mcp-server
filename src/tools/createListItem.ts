@@ -10,6 +10,7 @@ const FIELD_NAME_MAP: Record<string, string> = {
   "description": "field_5",
   "percentcomplete": "field_6",
   "percent complete": "field_6",
+  "%complete": "field_6",
   "isapproved": "field_8",
   "is approved": "field_8",
   "taskcategory": "field_9",
@@ -24,7 +25,8 @@ const KNOWN_LISTS: Record<string, string> = {
   "project tasks": "066a3b58-72a3-4fba-a3fc-3acae90be4bf",
 };
 
-const PROBLEMATIC_FIELDS = new Set(["field_2", "field_3", "field_9", "field_10"]);
+// These choice fields MUST be PATCHed after the initial POST
+const CHOICE_FIELDS = new Set(["field_2", "field_3", "field_9", "field_10"]);
 
 export const createListItemToolSchema = {
   name: "create_list_item",
@@ -76,60 +78,105 @@ export async function createListItem(listName: string, fields: Record<string, an
     listId = found.id;
   }
 
+  // Map all friendly field names to internal SharePoint names
   const allMapped: Record<string, any> = {};
   for (const [key, value] of Object.entries(fields)) {
     const internalName = FIELD_NAME_MAP[key.toLowerCase()] || key;
     allMapped[internalName] = value;
   }
 
+  // Separate safe fields (POST) from choice fields (PATCH)
   const safeFields: Record<string, any> = {};
-  const skippedFields: Record<string, any> = {};
+  const choiceFields: Record<string, any> = {};
 
   for (const [key, value] of Object.entries(allMapped)) {
-    if (PROBLEMATIC_FIELDS.has(key)) {
-      skippedFields[key] = value;
+    if (CHOICE_FIELDS.has(key)) {
+      choiceFields[key] = value;
     } else {
       safeFields[key] = value;
     }
   }
 
+  // Step 1: POST to create the item with safe fields only
   const res = await client.post(
     `/sites/${SITE_ID}/lists/${listId}/items`,
     { fields: safeFields }
   );
 
   const itemId = res.data.id;
+  const errors: string[] = [];
 
-  const successfulChoices: Record<string, any> = {};
-  const failedChoices: Record<string, any> = {};
-
-  for (const [fieldName, value] of Object.entries(skippedFields)) {
+  // Step 2: PATCH all choice fields together in ONE request (not one-by-one)
+  if (Object.keys(choiceFields).length > 0) {
     try {
       await client.patch(
         `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
-        { [fieldName]: value }
+        choiceFields
       );
-      successfulChoices[fieldName] = value;
-    } catch {
-      try {
-        await client.patch(
-          `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
-          { [fieldName]: [value] }
-        );
-        successfulChoices[fieldName] = [value];
-      } catch {
-        failedChoices[fieldName] = value;
+    } catch (err: any) {
+      // If batch PATCH fails, try each field individually
+      for (const [fieldName, value] of Object.entries(choiceFields)) {
+        let fieldSet = false;
+        // Try as plain string first
+        try {
+          await client.patch(
+            `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
+            { [fieldName]: value }
+          );
+          fieldSet = true;
+        } catch {
+          // Try as array
+          try {
+            await client.patch(
+              `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
+              { [fieldName]: [value] }
+            );
+            fieldSet = true;
+          } catch (e2: any) {
+            const errMsg = e2?.response?.data?.error?.message || e2?.message || String(e2);
+            errors.push(`${fieldName}="${value}" failed: ${errMsg}`);
+          }
+        }
       }
     }
   }
 
+  // Verify what was actually saved by reading back the item
+  let verifiedFields: Record<string, any> = {};
+  try {
+    const verifyRes = await client.get(
+      `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`
+    );
+    const data = verifyRes.data;
+    verifiedFields = {
+      Title: data.Title,
+      Status: data.field_2,
+      Priority: data.field_3,
+      DueDate: data.field_4,
+      Description: data.field_5,
+      PercentComplete: data.field_6,
+      TaskCategory: data.field_9,
+      DepartmentName: data.field_10,
+    };
+  } catch {
+    // verification failed, not critical
+  }
+
+  // Build honest status
+  const missing = Object.entries(verifiedFields)
+    .filter(([_, v]) => v === null || v === undefined || v === "")
+    .map(([k]) => k);
+
   return {
     id: itemId,
-    webUrl: res.data.webUrl,
+    webUrl: `https://dwivedimanshi12outlook.sharepoint.com/Lists/Project%20Tasks/DispForm.aspx?ID=${itemId}`,
     listName: listName,
-    fieldsCreated: safeFields,
-    choiceFieldsSet: successfulChoices,
-    choiceFieldsFailed: failedChoices,
-    status: "created",
+    status: errors.length === 0 && missing.length === 0 ? "fully_created" : "partially_created",
+    verifiedFields,
+    fieldErrors: errors.length > 0 ? errors : undefined,
+    missingFields: missing.length > 0 ? missing : undefined,
+    note: missing.length > 0
+      ? `⚠️ These fields were NOT saved: ${missing.join(", ")}. The item was created but is incomplete.`
+      : "✅ All fields saved successfully.",
   };
 }
