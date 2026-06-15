@@ -10,7 +10,6 @@ const FIELD_NAME_MAP: Record<string, string> = {
   "description": "field_5",
   "percentcomplete": "field_6",
   "percent complete": "field_6",
-  "%complete": "field_6",
   "isapproved": "field_8",
   "is approved": "field_8",
   "taskcategory": "field_9",
@@ -21,28 +20,21 @@ const FIELD_NAME_MAP: Record<string, string> = {
   "title": "Title",
 };
 
-// Checkbox-style choice fields must be sent as arrays
-const CHECKBOX_FIELDS = new Set(["field_2", "field_3", "field_9", "field_10"]);
-
-const VALID_CHOICES: Record<string, string[]> = {
-  "field_2": ["Not started", "In-Progress", "Completed", "Blocked"],
-  "field_3": ["High", "Medium", "Low"],
-  "field_9": ["Development", "Testing", "Design", "Documentation", "Meeting"],
-  "field_10": ["IT", "HR", "Finance", "Marketing", "Operations"],
-};
-
 const KNOWN_LISTS: Record<string, string> = {
   "project tasks": "066a3b58-72a3-4fba-a3fc-3acae90be4bf",
 };
+
+const PROBLEMATIC_FIELDS = new Set(["field_2", "field_3", "field_9", "field_10"]);
 
 export const createListItemToolSchema = {
   name: "create_list_item",
   description:
     "Creates a new item/row in a SharePoint List. " +
     "For 'Project Tasks' list use these fields: " +
-    "Title (text), Status ('Not started'|'In-Progress'|'Completed'|'Blocked'), " +
-    "Priority ('High'|'Medium'|'Low'), DueDate (YYYY-MM-DD), Description (text), " +
+    "Title (text, required), Description (text), DueDate (YYYY-MM-DD), " +
     "PercentComplete (0-100), IsApproved (true/false), " +
+    "Status ('Not started'|'In-Progress'|'Completed'|'Blocked'), " +
+    "Priority ('High'|'Medium'|'Low'), " +
     "TaskCategory ('Development'|'Testing'|'Design'|'Documentation'|'Meeting'), " +
     "DepartmentName ('IT'|'HR'|'Finance'|'Marketing'|'Operations').",
   inputSchema: {
@@ -84,35 +76,60 @@ export async function createListItem(listName: string, fields: Record<string, an
     listId = found.id;
   }
 
-  const mappedFields: Record<string, any> = {};
+  const allMapped: Record<string, any> = {};
   for (const [key, value] of Object.entries(fields)) {
     const internalName = FIELD_NAME_MAP[key.toLowerCase()] || key;
+    allMapped[internalName] = value;
+  }
 
-    if (VALID_CHOICES[internalName]) {
-      const validOpts = VALID_CHOICES[internalName];
-      const strValue = String(value);
-      if (!validOpts.includes(strValue)) {
-        throw new Error(
-          `Invalid value "${strValue}" for field "${key}". Valid options: ${validOpts.join(", ")}`
-        );
-      }
-      // Checkbox-style fields need array format
-      mappedFields[internalName] = CHECKBOX_FIELDS.has(internalName) ? [strValue] : strValue;
+  const safeFields: Record<string, any> = {};
+  const skippedFields: Record<string, any> = {};
+
+  for (const [key, value] of Object.entries(allMapped)) {
+    if (PROBLEMATIC_FIELDS.has(key)) {
+      skippedFields[key] = value;
     } else {
-      mappedFields[internalName] = value;
+      safeFields[key] = value;
     }
   }
 
   const res = await client.post(
     `/sites/${SITE_ID}/lists/${listId}/items`,
-    { fields: mappedFields }
+    { fields: safeFields }
   );
 
+  const itemId = res.data.id;
+
+  const successfulChoices: Record<string, any> = {};
+  const failedChoices: Record<string, any> = {};
+
+  for (const [fieldName, value] of Object.entries(skippedFields)) {
+    try {
+      await client.patch(
+        `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
+        { [fieldName]: value }
+      );
+      successfulChoices[fieldName] = value;
+    } catch {
+      try {
+        await client.patch(
+          `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
+          { [fieldName]: [value] }
+        );
+        successfulChoices[fieldName] = [value];
+      } catch {
+        failedChoices[fieldName] = value;
+      }
+    }
+  }
+
   return {
-    id: res.data.id,
+    id: itemId,
     webUrl: res.data.webUrl,
     listName: listName,
-    fieldsCreated: mappedFields,
+    fieldsCreated: safeFields,
+    choiceFieldsSet: successfulChoices,
+    choiceFieldsFailed: failedChoices,
     status: "created",
   };
 }

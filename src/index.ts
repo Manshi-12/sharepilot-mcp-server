@@ -10,6 +10,7 @@ import dotenv from "dotenv";
 import { searchFile, searchFileToolSchema } from "./tools/searchFile.js";
 import { readFile, readFileToolSchema } from "./tools/readFile.js";
 import { createListItem, createListItemToolSchema } from "./tools/createListItem.js";
+import { uploadFile, uploadFileToolSchema } from "./tools/uploadFile.js";
 
 dotenv.config();
 
@@ -22,7 +23,12 @@ function createMcpServer(): Server {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [searchFileToolSchema, readFileToolSchema, createListItemToolSchema],
+    tools: [
+      searchFileToolSchema,
+      readFileToolSchema,
+      createListItemToolSchema,
+      uploadFileToolSchema,
+    ],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -51,6 +57,14 @@ function createMcpServer(): Server {
           );
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
+        case "upload_file": {
+          const result = await uploadFile(
+            (args as any).filename,
+            (args as any).content,
+            (args as any).libraryName
+          );
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
@@ -74,7 +88,7 @@ async function main() {
   app.use(express.json());
 
   app.get("/", (_req, res) => {
-    res.json({ status: "ok", service: "sharepilot-mcp-server" });
+    res.json({ status: "ok", service: "sharepilot-mcp-server", tools: 4 });
   });
 
   app.post("/mcp", async (req, res) => {
