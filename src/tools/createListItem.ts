@@ -21,9 +21,6 @@ const FIELD_NAME_MAP: Record<string, string> = {
   "title": "Title",
 };
 
-// These are multi-select choice fields — must be sent as arrays
-const MULTI_CHOICE_FIELDS = new Set(["field_2", "field_3", "field_9", "field_10"]);
-
 const KNOWN_LISTS: Record<string, string> = {
   "project tasks": "066a3b58-72a3-4fba-a3fc-3acae90be4bf",
 };
@@ -42,15 +39,8 @@ export const createListItemToolSchema = {
   inputSchema: {
     type: "object",
     properties: {
-      listName: {
-        type: "string",
-        description: "Name of the SharePoint list, e.g. 'Project Tasks'.",
-      },
-      fields: {
-        type: "object",
-        description: "Field name-value pairs using the field names described above.",
-        additionalProperties: true,
-      },
+      listName: { type: "string", description: "Name of the SharePoint list." },
+      fields: { type: "object", description: "Field name-value pairs.", additionalProperties: true },
     },
     required: ["listName", "fields"],
   },
@@ -59,6 +49,7 @@ export const createListItemToolSchema = {
 export async function createListItem(listName: string, fields: Record<string, any>) {
   const client = await getGraphClient();
 
+  // --- Resolve list ID ---
   const listKey = listName.toLowerCase();
   let listId = KNOWN_LISTS[listKey];
 
@@ -74,60 +65,105 @@ export async function createListItem(listName: string, fields: Record<string, an
     listId = found.id;
   }
 
-  // Step 1: Map friendly names → internal SharePoint field names
-  const allMapped: Record<string, any> = {};
-  for (const [key, value] of Object.entries(fields)) {
-    const internalName = FIELD_NAME_MAP[key.toLowerCase()] || key;
+  // --- Fetch real column definitions to know which fields are multi-choice ---
+  const colRes = await client.get(
+    `/sites/${SITE_ID}/lists/${listId}/columns?$select=name,displayName,type,choice`
+  );
+  const columns: any[] = colRes.data.value || [];
 
-    // Multi-select choice fields MUST be arrays in the POST body
-    if (MULTI_CHOICE_FIELDS.has(internalName)) {
-      allMapped[internalName] = Array.isArray(value) ? value : [value];
-    } else {
-      allMapped[internalName] = value;
+  // Build set of internal names that are multi-select choice fields
+  const multiChoiceFields = new Set<string>();
+  const singleChoiceFields = new Set<string>();
+  for (const col of columns) {
+    if (col.choice) {
+      if (col.choice.displayAs === "checkBoxes") {
+        multiChoiceFields.add(col.name);
+      } else {
+        singleChoiceFields.add(col.name);
+      }
     }
   }
 
-  // Step 2: POST everything in one shot (including choice fields as arrays)
-  const res = await client.post(
-    `/sites/${SITE_ID}/lists/${listId}/items`,
-    { fields: allMapped }
-  );
+  // --- Map friendly names → internal names, wrap multi-choice as arrays ---
+  const mappedFields: Record<string, any> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    const internalName = FIELD_NAME_MAP[key.toLowerCase()] || key;
 
-  const itemId = res.data.id;
+    if (multiChoiceFields.has(internalName)) {
+      // Multi-select: must be array
+      mappedFields[internalName] = Array.isArray(value) ? value : [String(value)];
+    } else if (singleChoiceFields.has(internalName)) {
+      // Single-select: must be plain string
+      mappedFields[internalName] = Array.isArray(value) ? value[0] : String(value);
+    } else {
+      mappedFields[internalName] = value;
+    }
+  }
 
-  // Step 3: Read back what was actually saved to verify
+  // --- POST all fields in one request ---
+  let itemId: string;
+  let postError: string | null = null;
+
+  try {
+    const res = await client.post(
+      `/sites/${SITE_ID}/lists/${listId}/items`,
+      { fields: mappedFields }
+    );
+    itemId = res.data.id;
+  } catch (postErr: any) {
+    postError = postErr?.response?.data?.error?.message || postErr?.message || String(postErr);
+
+    // Fallback: POST only Title, then PATCH rest one by one
+    const safePost: Record<string, any> = { Title: mappedFields["Title"] || "Untitled" };
+    const fallbackRes = await client.post(
+      `/sites/${SITE_ID}/lists/${listId}/items`,
+      { fields: safePost }
+    );
+    itemId = fallbackRes.data.id;
+
+    // PATCH each field individually and log results
+    for (const [fieldName, value] of Object.entries(mappedFields)) {
+      if (fieldName === "Title") continue;
+      try {
+        await client.patch(
+          `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
+          { [fieldName]: value }
+        );
+      } catch (patchErr: any) {
+        // log but continue
+        console.error(`PATCH failed for ${fieldName}:`, patchErr?.response?.data);
+      }
+    }
+  }
+
+  // --- Read back to verify ---
   const verifyRes = await client.get(
     `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`
   );
   const saved = verifyRes.data;
 
-  // Normalize: unwrap single-element arrays for display
-  const unwrap = (v: any) => Array.isArray(v) ? (v.length === 1 ? v[0] : v) : v;
-
-  const verifiedFields = {
-    Title: saved.Title || null,
-    Status: unwrap(saved.field_2) || null,
-    Priority: unwrap(saved.field_3) || null,
-    DueDate: saved.field_4 || null,
-    Description: saved.field_5 || null,
-    PercentComplete: saved.field_6 ?? null,
-    TaskCategory: unwrap(saved.field_9) || null,
-    DepartmentName: unwrap(saved.field_10) || null,
-  };
+  // Build verified snapshot of only the fields we tried to set
+  const verifiedFields: Record<string, any> = {};
+  for (const [key] of Object.entries(fields)) {
+    const internalName = FIELD_NAME_MAP[key.toLowerCase()] || key;
+    const rawVal = saved[internalName];
+    verifiedFields[key] = Array.isArray(rawVal) && rawVal.length === 1 ? rawVal[0] : rawVal ?? null;
+  }
 
   const missingFields = Object.entries(verifiedFields)
-    .filter(([_, v]) => v === null || v === undefined)
+    .filter(([_, v]) => v === null || v === undefined || v === "")
     .map(([k]) => k);
 
   return {
     id: itemId,
-    webUrl: `https://dwivedimanshi12outlook.sharepoint.com/Lists/Project%20Tasks/DispForm.aspx?ID=${itemId}`,
+    webUrl: `https://dwivedimanshi12outlook.sharepoint.com/Lists/${encodeURIComponent(listName)}/DispForm.aspx?ID=${itemId}`,
     listName,
     status: missingFields.length === 0 ? "fully_created" : "partially_created",
     verifiedFields,
     missingFields: missingFields.length > 0 ? missingFields : undefined,
+    postError: postError ?? undefined,
     note: missingFields.length === 0
       ? "✅ All fields saved successfully."
-      : `⚠️ These fields were not provided or saved: ${missingFields.join(", ")}`,
+      : `⚠️ Fields not saved: ${missingFields.join(", ")}. postError: ${postError}`,
   };
 }

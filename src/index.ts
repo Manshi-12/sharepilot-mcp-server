@@ -68,7 +68,10 @@ function createMcpServer(): Server {
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
         case "debug_list_item": {
-          const result = await debugListItem((args as any).itemId);
+          const result = await debugListItem(
+            (args as any).listName,
+            (args as any).itemId
+          );
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
         default:
