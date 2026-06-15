@@ -2,45 +2,6 @@ import { getGraphClient } from "../auth/graphClient.js";
 
 const SITE_ID = process.env.SITE_ID || "";
 
-// Hardcoded map ONLY for Project Tasks (internal names differ from display names)
-const PROJECT_TASKS_FIELD_MAP: Record<string, string> = {
-  "title": "Title",
-  "status": "field_2",
-  "priority": "field_3",
-  "duedate": "field_4",
-  "due date": "field_4",
-  "description": "field_5",
-  "percentcomplete": "field_6",
-  "percent complete": "field_6",
-  "%complete": "field_6",
-  "isapproved": "field_8",
-  "is approved": "field_8",
-  "taskcategory": "field_9",
-  "task category": "field_9",
-  "departmentname": "field_10",
-  "department name": "field_10",
-  "department": "field_10",
-};
-
-// System fields that SharePoint manages internally — never write to these
-const SYSTEM_FIELDS = new Set([
-  "ID", "Id", "id",
-  "ContentType", "ContentTypeId",
-  "Modified", "Created",
-  "Author", "AuthorId",
-  "Editor", "EditorId",
-  "AppAuthor", "AppAuthorId",
-  "AppEditor", "AppEditorId",
-  "_UIVersionString", "_UIVersion",
-  "Attachments", "Edit",
-  "LinkTitle", "LinkTitleNoMenu", "LinkFilename",
-  "DocIcon", "ItemChildCount", "FolderChildCount",
-  "_ColorTag", "ComplianceAssetId",
-  "_ComplianceFlags", "_ComplianceTag",
-  "_ComplianceTagWrittenTime", "_ComplianceTagUserId",
-  "_IsRecord",
-]);
-
 const KNOWN_LISTS: Record<string, string> = {
   "project tasks": "066a3b58-72a3-4fba-a3fc-3acae90be4bf",
 };
@@ -48,18 +9,18 @@ const KNOWN_LISTS: Record<string, string> = {
 export const createListItemToolSchema = {
   name: "create_list_item",
   description:
-    "Creates a new item/row in ANY SharePoint List. " +
-    "For 'Project Tasks' list, supported fields: " +
-    "Title (required), Description, DueDate (YYYY-MM-DD), PercentComplete (0-100), IsApproved (true/false), " +
+    "Creates a new item/row in a SharePoint List. " +
+    "For 'Project Tasks' list use these fields: " +
+    "Title (text, required), Description (text), DueDate (YYYY-MM-DD), " +
+    "PercentComplete (0-100), IsApproved (true/false), " +
     "Status ('Not started'|'In-Progress'|'Completed'|'Blocked'), " +
     "Priority ('High'|'Medium'|'Low'), " +
     "TaskCategory ('Development'|'Testing'|'Design'|'Documentation'|'Meeting'), " +
-    "DepartmentName ('IT'|'HR'|'Finance'|'Marketing'|'Operations'). " +
-    "For other lists, use the exact column internal names as field keys.",
+    "DepartmentName ('IT'|'HR'|'Finance'|'Marketing'|'Operations').",
   inputSchema: {
     type: "object",
     properties: {
-      listName: { type: "string", description: "Display name of the SharePoint list." },
+      listName: { type: "string", description: "Name of the SharePoint list." },
       fields: { type: "object", description: "Field name-value pairs.", additionalProperties: true },
     },
     required: ["listName", "fields"],
@@ -69,7 +30,6 @@ export const createListItemToolSchema = {
 export async function createListItem(listName: string, fields: Record<string, any>) {
   const client = await getGraphClient();
 
-  // ── 1. Resolve list ID ───────────────────────────────────────────────────────
   const listKey = listName.toLowerCase();
   let listId = KNOWN_LISTS[listKey];
 
@@ -85,110 +45,87 @@ export async function createListItem(listName: string, fields: Record<string, an
     listId = found.id;
   }
 
-  // ── 2. Fetch column schema — only writable, non-hidden columns ───────────────
-  const colRes = await client.get(`/sites/${SITE_ID}/lists/${listId}/columns`);
-  const columns: any[] = colRes.data.value || [];
-
-  // Only keep user-editable columns
-  const writableColumns = columns.filter(
-    (c: any) => !c.readOnly && !c.hidden && !SYSTEM_FIELDS.has(c.name)
-  );
-
-  // Map: internalName → choice schema
-  const choiceSchema: Record<string, { displayAs: string; choices: string[] }> = {};
-  for (const col of writableColumns) {
-    if (col.choice) {
-      choiceSchema[col.name] = {
-        displayAs: col.choice.displayAs || "dropDownMenu",
-        choices: col.choice.choices || [],
-      };
-    }
-  }
-
-  // Map: displayName.toLowerCase() → internalName (only for writable columns)
-  const displayToInternal: Record<string, string> = {};
-  for (const col of writableColumns) {
-    displayToInternal[col.displayName.toLowerCase()] = col.name;
-    displayToInternal[col.name.toLowerCase()] = col.name;
-  }
-
-  // ── 3. Map user fields → internal names, skip system fields ─────────────────
+  // Project Tasks: hardcoded known-good field map
+  // field_2=Status, field_3=Priority, field_9=TaskCategory, field_10=DepartmentName
+  // ALL are checkBoxes type → must be sent as string arrays
   const isProjectTasks = listKey === "project tasks";
-  const mappedFields: Record<string, any> = {};
 
-  for (const [userKey, value] of Object.entries(fields)) {
-    // Skip if user accidentally passed a system field
-    if (SYSTEM_FIELDS.has(userKey)) continue;
+  let postBody: Record<string, any> = {};
 
-    let internalName: string;
-    if (isProjectTasks) {
-      internalName = PROJECT_TASKS_FIELD_MAP[userKey.toLowerCase()] ?? userKey;
-    } else {
-      internalName = displayToInternal[userKey.toLowerCase()] ?? userKey;
-    }
-
-    // Skip system fields even after mapping
-    if (SYSTEM_FIELDS.has(internalName)) continue;
-
-    // Apply correct format based on choice schema
-    const schema = choiceSchema[internalName];
-    if (schema) {
-      if (schema.displayAs === "checkBoxes") {
-        // Multi-select: MUST be array of strings
-        mappedFields[internalName] = Array.isArray(value)
-          ? value.map(String)
-          : [String(value)];
-      } else {
-        // Single-select (dropDownMenu): MUST be plain string, NOT array
-        mappedFields[internalName] = Array.isArray(value)
-          ? String(value[0])
-          : String(value);
+  if (isProjectTasks) {
+    // Map ONLY the fields user provided, nothing else
+    for (const [key, value] of Object.entries(fields)) {
+      const k = key.toLowerCase().replace(/\s/g, "");
+      switch (k) {
+        case "title":
+          postBody["Title"] = String(value); break;
+        case "status":
+          postBody["field_2"] = [String(value)]; break;
+        case "priority":
+          postBody["field_3"] = [String(value)]; break;
+        case "duedate":
+          postBody["field_4"] = String(value); break;
+        case "description":
+          postBody["field_5"] = String(value); break;
+        case "percentcomplete":
+        case "%complete":
+          postBody["field_6"] = Number(value); break;
+        case "isapproved":
+          postBody["field_8"] = Boolean(value); break;
+        case "taskcategory":
+          postBody["field_9"] = [String(value)]; break;
+        case "departmentname":
+        case "department":
+          postBody["field_10"] = [String(value)]; break;
+        default:
+          postBody[key] = value;
       }
-    } else {
-      // Regular field: send as-is
-      mappedFields[internalName] = value;
+    }
+  } else {
+    // For other lists: send Title + known fields as plain strings
+    for (const [key, value] of Object.entries(fields)) {
+      postBody[key] = value;
     }
   }
 
-  // ── 4. POST all fields in one request ───────────────────────────────────────
+  // POST
   const res = await client.post(
     `/sites/${SITE_ID}/lists/${listId}/items`,
-    { fields: mappedFields }
+    { fields: postBody }
   );
   const itemId = res.data.id;
 
-  // ── 5. Verify: read back what was actually saved ─────────────────────────────
+  // Read back to verify
   const verifyRes = await client.get(
     `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`
   );
   const saved = verifyRes.data;
 
-  // Build verified map using user-friendly keys
+  const unwrap = (v: any) => Array.isArray(v) ? (v.length === 1 ? v[0] : v) : v;
+
   const verifiedFields: Record<string, any> = {};
-  for (const [userKey] of Object.entries(fields)) {
-    if (SYSTEM_FIELDS.has(userKey)) continue;
-
-    let internalName: string;
-    if (isProjectTasks) {
-      internalName = PROJECT_TASKS_FIELD_MAP[userKey.toLowerCase()] ?? userKey;
-    } else {
-      internalName = displayToInternal[userKey.toLowerCase()] ?? userKey;
+  if (isProjectTasks) {
+    verifiedFields.Title = saved.Title ?? null;
+    verifiedFields.Status = unwrap(saved.field_2) ?? null;
+    verifiedFields.Priority = unwrap(saved.field_3) ?? null;
+    verifiedFields.DueDate = saved.field_4 ?? null;
+    verifiedFields.Description = saved.field_5 ?? null;
+    verifiedFields.PercentComplete = saved.field_6 ?? null;
+    verifiedFields.TaskCategory = unwrap(saved.field_9) ?? null;
+    verifiedFields.DepartmentName = unwrap(saved.field_10) ?? null;
+  } else {
+    for (const key of Object.keys(fields)) {
+      verifiedFields[key] = saved[key] ?? null;
     }
-
-    const raw = saved[internalName];
-    verifiedFields[userKey] =
-      Array.isArray(raw) && raw.length === 1 ? raw[0] : (raw ?? null);
   }
 
   const missingFields = Object.entries(verifiedFields)
     .filter(([_, v]) => v === null || v === undefined || v === "")
     .map(([k]) => k);
 
-  const sharePointUrl = `https://dwivedimanshi12outlook.sharepoint.com/Lists/${listName.replace(/ /g, "%20")}/DispForm.aspx?ID=${itemId}`;
-
   return {
     id: itemId,
-    webUrl: sharePointUrl,
+    webUrl: `https://dwivedimanshi12outlook.sharepoint.com/Lists/${listName.replace(/ /g, "%20")}/DispForm.aspx?ID=${itemId}`,
     listName,
     status: missingFields.length === 0 ? "fully_created" : "partially_created",
     verifiedFields,
