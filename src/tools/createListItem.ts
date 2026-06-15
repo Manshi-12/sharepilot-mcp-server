@@ -25,7 +25,7 @@ const KNOWN_LISTS: Record<string, string> = {
   "project tasks": "066a3b58-72a3-4fba-a3fc-3acae90be4bf",
 };
 
-// These choice fields MUST be PATCHed after the initial POST
+// Choice fields that need special handling
 const CHOICE_FIELDS = new Set(["field_2", "field_3", "field_9", "field_10"]);
 
 export const createListItemToolSchema = {
@@ -85,7 +85,7 @@ export async function createListItem(listName: string, fields: Record<string, an
     allMapped[internalName] = value;
   }
 
-  // Separate safe fields (POST) from choice fields (PATCH)
+  // Separate safe fields (go in POST) from choice fields (PATCH after)
   const safeFields: Record<string, any> = {};
   const choiceFields: Record<string, any> = {};
 
@@ -97,86 +97,125 @@ export async function createListItem(listName: string, fields: Record<string, an
     }
   }
 
-  // Step 1: POST to create the item with safe fields only
+  // Step 1: POST to create the item with safe fields
   const res = await client.post(
     `/sites/${SITE_ID}/lists/${listId}/items`,
     { fields: safeFields }
   );
-
   const itemId = res.data.id;
-  const errors: string[] = [];
 
-  // Step 2: PATCH all choice fields together in ONE request (not one-by-one)
-  if (Object.keys(choiceFields).length > 0) {
-    try {
-      await client.patch(
-        `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
-        choiceFields
+  // Step 2: Get real column definitions so we use exact internal names
+  const colRes = await client.get(
+    `/sites/${SITE_ID}/lists/${listId}/columns?$select=name,displayName,type,choice`
+  );
+  const columns: any[] = colRes.data.value || [];
+
+  // Build a map: field_X -> { internalName, choices[] }
+  const choiceColMap: Record<string, { internalName: string; choices: string[] }> = {};
+  for (const col of columns) {
+    if (col.choice?.choices?.length > 0) {
+      choiceColMap[col.name] = {
+        internalName: col.name,
+        choices: col.choice.choices,
+      };
+    }
+  }
+
+  // Step 3: PATCH each choice field individually with validated value
+  const patchResults: Record<string, any> = {};
+
+  for (const [fieldName, value] of Object.entries(choiceFields)) {
+    const colInfo = choiceColMap[fieldName];
+
+    // Validate value against allowed choices
+    if (colInfo) {
+      const match = colInfo.choices.find(
+        (c: string) => c.toLowerCase() === String(value).toLowerCase()
       );
-    } catch (err: any) {
-      // If batch PATCH fails, try each field individually
-      for (const [fieldName, value] of Object.entries(choiceFields)) {
-        let fieldSet = false;
-        // Try as plain string first
+
+      if (!match) {
+        patchResults[fieldName] = {
+          attempted: value,
+          result: "error",
+          reason: `Value "${value}" not in allowed choices: [${colInfo.choices.join(", ")}]`,
+        };
+        continue;
+      }
+
+      // Use exactly-matched choice value (correct casing)
+      const exactValue = match;
+
+      // Try plain string PATCH
+      try {
+        await client.patch(
+          `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
+          { [fieldName]: exactValue }
+        );
+        patchResults[fieldName] = { attempted: exactValue, result: "success" };
+      } catch (e1: any) {
+        const err1 = e1?.response?.data?.error?.message || e1?.message || String(e1);
+        // Try array format
         try {
           await client.patch(
             `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
-            { [fieldName]: value }
+            { [fieldName]: [exactValue] }
           );
-          fieldSet = true;
-        } catch {
-          // Try as array
-          try {
-            await client.patch(
-              `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
-              { [fieldName]: [value] }
-            );
-            fieldSet = true;
-          } catch (e2: any) {
-            const errMsg = e2?.response?.data?.error?.message || e2?.message || String(e2);
-            errors.push(`${fieldName}="${value}" failed: ${errMsg}`);
-          }
+          patchResults[fieldName] = { attempted: [exactValue], result: "success" };
+        } catch (e2: any) {
+          const err2 = e2?.response?.data?.error?.message || e2?.message || String(e2);
+          patchResults[fieldName] = {
+            attempted: exactValue,
+            result: "error",
+            reason: `Plain string failed: "${err1}" | Array format failed: "${err2}"`,
+          };
         }
+      }
+    } else {
+      // Column not found in schema, try anyway
+      try {
+        await client.patch(
+          `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
+          { [fieldName]: value }
+        );
+        patchResults[fieldName] = { attempted: value, result: "success" };
+      } catch (e: any) {
+        patchResults[fieldName] = {
+          attempted: value,
+          result: "error",
+          reason: e?.response?.data?.error?.message || e?.message,
+        };
       }
     }
   }
 
-  // Verify what was actually saved by reading back the item
-  let verifiedFields: Record<string, any> = {};
-  try {
-    const verifyRes = await client.get(
-      `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`
-    );
-    const data = verifyRes.data;
-    verifiedFields = {
-      Title: data.Title,
-      Status: data.field_2,
-      Priority: data.field_3,
-      DueDate: data.field_4,
-      Description: data.field_5,
-      PercentComplete: data.field_6,
-      TaskCategory: data.field_9,
-      DepartmentName: data.field_10,
-    };
-  } catch {
-    // verification failed, not critical
-  }
+  // Step 4: Read back what was actually saved
+  const verifyRes = await client.get(
+    `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`
+  );
+  const saved = verifyRes.data;
 
-  // Build honest status
-  const missing = Object.entries(verifiedFields)
-    .filter(([_, v]) => v === null || v === undefined || v === "")
-    .map(([k]) => k);
+  const verifiedFields = {
+    Title: saved.Title || null,
+    Status: saved.field_2 || null,
+    Priority: saved.field_3 || null,
+    DueDate: saved.field_4 || null,
+    Description: saved.field_5 || null,
+    PercentComplete: saved.field_6 || null,
+    TaskCategory: saved.field_9 || null,
+    DepartmentName: saved.field_10 || null,
+  };
+
+  const failedFields = Object.entries(patchResults)
+    .filter(([_, v]) => v.result === "error")
+    .map(([k, v]) => `${k}: ${v.reason}`);
 
   return {
     id: itemId,
     webUrl: `https://dwivedimanshi12outlook.sharepoint.com/Lists/Project%20Tasks/DispForm.aspx?ID=${itemId}`,
-    listName: listName,
-    status: errors.length === 0 && missing.length === 0 ? "fully_created" : "partially_created",
+    listName,
+    status: failedFields.length === 0 ? "fully_created" : "partially_created",
     verifiedFields,
-    fieldErrors: errors.length > 0 ? errors : undefined,
-    missingFields: missing.length > 0 ? missing : undefined,
-    note: missing.length > 0
-      ? `⚠️ These fields were NOT saved: ${missing.join(", ")}. The item was created but is incomplete.`
-      : "✅ All fields saved successfully.",
+    choiceFieldResults: patchResults,
+    errors: failedFields.length > 0 ? failedFields : undefined,
   };
 }
