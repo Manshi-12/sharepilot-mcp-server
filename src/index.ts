@@ -113,7 +113,6 @@ async function main() {
   app.use(express.json());
 
   app.get("/", (_req, res) => {
-    res.json({ status: "ok", service: "sharepilot-mcp-server", tools: 5 });
     res.json({ status: "ok", service: "sharepilot-mcp-server", tools: 6 });
   });
 

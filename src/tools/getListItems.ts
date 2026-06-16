@@ -175,12 +175,27 @@ export async function getListItems(listName: string, search?: string, top: numbe
         }
 
         // --- Image fields ---
-        // SharePoint image columns come back as a JSON string with serverUrl + serverRelativeUrl
-        if (col?.type === "hyperlinkOrPicture" || 
-            (typeof value === "string" && value.includes("serverRelativeUrl"))) {
-          const imageUrl = parseSharePointImageField(value);
-          if (imageUrl) {
-            cleaned[displayName] = imageUrl; // clean direct URL, ready for <img src="">
+        // SharePoint image columns store a JSON string with serverUrl + serverRelativeUrl.
+        // We detect this by checking the raw string content, not column type.
+        if (typeof value === "string" && value.includes("serverRelativeUrl")) {
+          try {
+            const parsed = JSON.parse(value);
+            if (parsed.serverUrl && parsed.serverRelativeUrl) {
+              cleaned[displayName] = {
+                imageUrl: parsed.serverUrl + parsed.serverRelativeUrl,
+                fileName: parsed.fileName || "",
+              };
+              continue;
+            }
+          } catch {
+            // not valid JSON, fall through
+          }
+        }
+
+        // hyperlinkOrPicture columns (non-image, plain URL type)
+        if (col?.type === "hyperlinkOrPicture") {
+          if (value && typeof value === "object" && (value as any).Url) {
+            cleaned[displayName] = { url: (value as any).Url, label: (value as any).Description };
             continue;
           }
         }

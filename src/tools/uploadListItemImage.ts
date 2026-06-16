@@ -87,15 +87,14 @@ export async function uploadListItemImage(
   );
 
   const uploadedItem = uploadRes.data;
-  // Extract origin reliably — always from the uploaded item's webUrl
   const uploadedWebUrl: string = uploadedItem.webUrl || "";
-  const serverUrl = uploadedWebUrl
-    ? new URL(uploadedWebUrl).origin   // e.g. https://dwivedimanshi12outlook.sharepoint.com
-    : (SITE_URL ? new URL(SITE_URL).origin : "");
+  if (!uploadedWebUrl) {
+    throw new Error("Upload succeeded but Graph did not return a webUrl. Cannot set image field.");
+  }
 
-  const serverRelativeUrl: string = uploadedWebUrl
-    ? new URL(uploadedWebUrl).pathname  // e.g. /sites/YourSite/Site Assets/photo.jpg
-    : `/${fileName}`;
+  const parsedUrl = new URL(uploadedWebUrl);
+  const serverUrl = parsedUrl.origin;
+  const serverRelativeUrl = parsedUrl.pathname;
 
   const imageFieldValue = {
     type: "thumbnail",
@@ -103,6 +102,11 @@ export async function uploadListItemImage(
     serverUrl: serverUrl,
     serverRelativeUrl: serverRelativeUrl,
   };
+
+  await client.patch(
+    `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}/fields`,
+    { [internalName]: JSON.stringify(imageFieldValue) }
+  );
 
   await client.patch(
     `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}/fields`,
