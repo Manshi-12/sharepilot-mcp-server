@@ -1,5 +1,5 @@
 import { getGraphClient } from "../auth/graphClient.js";
-import { resolveList, getListColumns, findColumn, ColumnInfo } from "../utils/resolve.js";
+import { resolveList, getListColumns, findColumn, resolvePersonId, ColumnInfo } from "../utils/resolve.js";
 
 const SITE_ID = process.env.SITE_ID || "";
 
@@ -8,9 +8,10 @@ export const createListItemToolSchema = {
   description:
     "Creates a new item/row in any SharePoint List on the site by display name. " +
     "Field names should match the list's actual column display names (e.g. 'Title', " +
-    "'Priority', 'Due Date'). The server automatically discovers the list's real schema " +
-    "(choice, multi-choice, date, number, yes/no, lookup, person fields) — works for any " +
-    "list, not just one specific one.",
+    "'Priority', 'Due Date', 'Assigned To'). The server automatically discovers the " +
+    "list's real schema — choice, multi-choice, date, number, yes/no, lookup, and " +
+    "person fields are all handled correctly. For person fields, pass the person's " +
+    "display name or email as it appears on the site.",
   inputSchema: {
     type: "object",
     properties: {
@@ -38,7 +39,6 @@ function coerceValue(col: ColumnInfo, value: any): any {
     case "currency":
       return typeof value === "number" ? value : Number(value);
     case "dateTime": {
-      // Accept "YYYY-MM-DD" or a full ISO string; normalize to ISO with time.
       const d = new Date(value);
       return isNaN(d.getTime()) ? value : d.toISOString();
     }
@@ -49,7 +49,14 @@ function coerceValue(col: ColumnInfo, value: any): any {
   }
 }
 
-const CHOICE_TYPES = new Set(["choice", "multiChoice"]);
+async function patchField(
+  client: any,
+  listId: string,
+  itemId: string,
+  body: Record<string, any>
+): Promise<void> {
+  await client.patch(`/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`, body);
+}
 
 export async function createListItem(listName: string, fields: Record<string, any>) {
   const client = await getGraphClient();
@@ -57,67 +64,92 @@ export async function createListItem(listName: string, fields: Record<string, an
   const list = await resolveList(client, listName);
   const columns = await getListColumns(client, list.id);
 
-  const safeFields: Record<string, any> = {};      // first-pass POST (non-choice columns)
-  const choiceFields: Record<string, { internalName: string; value: any; type: ColumnInfo["type"] }> = {};
-  const unmatchedFields: Record<string, any> = {};  // keys we couldn't map to any real column
+  // Pull Title out separately — it's the one field safe to include in the very first
+  // POST that creates the item shell. Every other field is set afterward, one at a
+  // time, so a problem with any single field can never block the rest.
+  const titleKey = Object.keys(fields).find((k) => k.toLowerCase() === "title");
+  const titleValue = titleKey ? fields[titleKey] : "";
+
+  let itemId: string;
+  let webUrl: string;
+  try {
+    const res = await client.post(`/sites/${SITE_ID}/lists/${list.id}/items`, {
+      fields: { Title: titleValue },
+    });
+    itemId = res.data.id;
+    webUrl = res.data.webUrl;
+  } catch (e: any) {
+    throw new Error(
+      `Could not create the item at all (failed even with just Title set): ` +
+      (e?.response?.data?.error?.message || e.message)
+    );
+  }
+
+  const verifiedFields: Record<string, any> = { Title: titleValue };
+  const fieldErrors: Record<string, string> = {};
 
   for (const [key, rawValue] of Object.entries(fields)) {
-    if (key.toLowerCase() === "title") {
-      safeFields["Title"] = rawValue;
-      continue;
-    }
+    if (titleKey && key === titleKey) continue;
 
     const col = findColumn(columns, key);
     if (!col) {
-      unmatchedFields[key] = rawValue;
+      fieldErrors[key] = `No column named "${key}" exists on the "${list.displayName}" list.`;
+      continue;
+    }
+
+    // Person/Group fields need the site-user's numeric ID, not their name.
+    if (col.type === "personOrGroup") {
+      const rawNames = Array.isArray(rawValue) ? rawValue : [rawValue];
+      const resolvedIds: number[] = [];
+      const unresolvedNames: string[] = [];
+
+      for (const n of rawNames) {
+        const id = await resolvePersonId(client, String(n));
+        if (id !== null) resolvedIds.push(id);
+        else unresolvedNames.push(String(n));
+      }
+
+      if (unresolvedNames.length > 0) {
+        fieldErrors[key] =
+          `Could not find a site user matching: ${unresolvedNames.join(", ")}. ` +
+          `Use their exact display name or email as it appears on the SharePoint site.`;
+        continue;
+      }
+
+      try {
+        await patchField(client, list.id, itemId, {
+          [`${col.internalName}LookupId`]: col.multi ? resolvedIds : resolvedIds[0],
+        });
+        verifiedFields[key] = rawValue;
+      } catch (e: any) {
+        fieldErrors[key] = e?.response?.data?.error?.message || e.message || "Failed to set this field.";
+      }
       continue;
     }
 
     const value = coerceValue(col, rawValue);
 
-    if (CHOICE_TYPES.has(col.type)) {
-      // Choice-type columns frequently 500 when sent in the initial POST (this is the
-      // checkbox-display-type quirk you ran into) — set them in a second PATCH instead.
-      choiceFields[key] = { internalName: col.internalName, value, type: col.type };
-    } else {
-      safeFields[col.internalName] = value;
-    }
-  }
-
-  const res = await client.post(
-    `/sites/${SITE_ID}/lists/${list.id}/items`,
-    { fields: safeFields }
-  );
-
-  const itemId = res.data.id;
-
-  const verifiedFields: Record<string, any> = { ...safeFields };
-  const fieldErrors: Record<string, string> = {};
-
-  for (const [displayKey, { internalName, value, type }] of Object.entries(choiceFields)) {
     try {
-      await client.patch(
-        `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}/fields`,
-        { [internalName]: value }
-      );
-      verifiedFields[displayKey] = value;
-    } catch {
-      // Fallback: some choice columns insist on array format even when single-value.
-      try {
-        const arrayValue = Array.isArray(value) ? value : [value];
-        await client.patch(
-          `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}/fields`,
-          { [internalName]: arrayValue }
-        );
-        verifiedFields[displayKey] = arrayValue;
-      } catch (e: any) {
-        fieldErrors[displayKey] = e?.response?.data?.error?.message || e.message || "Failed to set this field.";
+      await patchField(client, list.id, itemId, { [col.internalName]: value });
+      verifiedFields[key] = value;
+    } catch (firstError: any) {
+      // Choice columns configured as "checkboxes" in the SharePoint UI behave as
+      // multi-select under the hood even if Graph reports a single value was sent —
+      // retrying with an array is a safe fallback for exactly that quirk.
+      if (col.type === "choice" || col.type === "multiChoice") {
+        try {
+          const arrayValue = Array.isArray(value) ? value : [value];
+          await patchField(client, list.id, itemId, { [col.internalName]: arrayValue });
+          verifiedFields[key] = arrayValue;
+          continue;
+        } catch (secondError: any) {
+          fieldErrors[key] =
+            secondError?.response?.data?.error?.message || secondError.message || "Failed to set this field.";
+          continue;
+        }
       }
+      fieldErrors[key] = firstError?.response?.data?.error?.message || firstError.message || "Failed to set this field.";
     }
-  }
-
-  for (const key of Object.keys(unmatchedFields)) {
-    fieldErrors[key] = `No column named "${key}" exists on the "${list.displayName}" list.`;
   }
 
   const missingFields = Object.keys(fieldErrors);
@@ -125,7 +157,7 @@ export async function createListItem(listName: string, fields: Record<string, an
 
   return {
     id: itemId,
-    webUrl: res.data.webUrl,
+    webUrl,
     listName: list.displayName,
     status,
     verifiedFields,

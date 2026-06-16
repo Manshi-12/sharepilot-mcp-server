@@ -27,6 +27,7 @@ export interface ColumnInfo {
       | "lookup" | "personOrGroup" | "hyperlinkOrPicture" | "text";
   required: boolean;
   choices?: string[];
+  multi?: boolean; // for personOrGroup: can it hold more than one person?
 }
 
 let driveCache: CacheEntry<DriveInfo[]> | null = null;
@@ -135,6 +136,7 @@ export async function getListColumns(client: AxiosInstance, listId: string): Pro
     .map((c: any) => {
       let type: ColumnInfo["type"] = "text";
       let choices: string[] | undefined;
+      let multi: boolean | undefined;
 
       if (c.choice) {
         type = c.choice.allowMultipleValues ? "multiChoice" : "choice";
@@ -144,8 +146,10 @@ export async function getListColumns(client: AxiosInstance, listId: string): Pro
       else if (c.currency) type = "currency";
       else if (c.dateTime) type = "dateTime";
       else if (c.lookup) type = "lookup";
-      else if (c.personOrGroup) type = "personOrGroup";
-      else if (c.hyperlinkOrPicture) type = "hyperlinkOrPicture";
+      else if (c.personOrGroup) {
+        type = "personOrGroup";
+        multi = !!c.personOrGroup.allowMultipleSelections;
+      } else if (c.hyperlinkOrPicture) type = "hyperlinkOrPicture";
 
       return {
         internalName: c.name,
@@ -153,6 +157,7 @@ export async function getListColumns(client: AxiosInstance, listId: string): Pro
         type,
         required: !!c.required,
         choices,
+        multi,
       };
     });
 
@@ -164,4 +169,56 @@ export async function getListColumns(client: AxiosInstance, listId: string): Pro
 export function findColumn(columns: ColumnInfo[], key: string): ColumnInfo | undefined {
   const k = normalizeKey(key);
   return columns.find((c) => normalizeKey(c.displayName) === k || normalizeKey(c.internalName) === k);
+}
+
+// ---------- Person field resolution ----------
+// SharePoint Person/Group columns need the person's internal numeric site-user ID
+// (set via "{InternalName}LookupId"), not their plain display name. Every SharePoint
+// site has a hidden "User Information List" that's just a normal list under the hood —
+// readable through Graph with the same Sites.Selected permission you already granted —
+// so we look the person up there by name or email instead of needing extra app permissions.
+
+let userInfoListIdCache: { id: string; expiresAt: number } | null = null;
+
+async function getUserInfoListId(client: AxiosInstance): Promise<string> {
+  if (userInfoListIdCache && userInfoListIdCache.expiresAt > Date.now()) return userInfoListIdCache.id;
+
+  const res = await client.get(`/sites/${SITE_ID}/lists?$select=id,displayName`);
+  const match = (res.data.value || []).find(
+    (l: any) => (l.displayName || "").toLowerCase() === "user information list"
+  );
+  if (!match) throw new Error("Could not locate this site's User Information List.");
+
+  userInfoListIdCache = { id: match.id, expiresAt: Date.now() + CACHE_TTL_MS };
+  return match.id;
+}
+
+/**
+ * Resolves a person's display name or email to their numeric site-user ID
+ * (the value SharePoint Person/Group columns actually need). Returns null —
+ * never throws — if no confident match is found, so callers can report a
+ * clear per-field error instead of crashing the whole item creation.
+ */
+export async function resolvePersonId(client: AxiosInstance, nameOrEmail: string): Promise<number | null> {
+  try {
+    const listId = await getUserInfoListId(client);
+    const res = await client.get(`/sites/${SITE_ID}/lists/${listId}/items`, {
+      params: { $expand: "fields(select=Title,EMail)", $top: 2000 },
+    });
+
+    const key = nameOrEmail.trim().toLowerCase();
+    const items = res.data.value || [];
+
+    const exact = items.find(
+      (i: any) =>
+        (i.fields?.Title || "").toLowerCase() === key ||
+        (i.fields?.EMail || "").toLowerCase() === key
+    );
+    if (exact) return Number(exact.id);
+
+    const partial = items.find((i: any) => (i.fields?.Title || "").toLowerCase().includes(key));
+    return partial ? Number(partial.id) : null;
+  } catch {
+    return null;
+  }
 }
