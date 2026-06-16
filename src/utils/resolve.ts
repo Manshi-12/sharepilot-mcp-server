@@ -2,7 +2,7 @@ import { AxiosInstance } from "axios";
 
 const SITE_ID = process.env.SITE_ID || "";
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes — long enough to avoid hammering Graph,
-                                     // short enough that a newly-created library/list shows up fast.
+// short enough that a newly-created library/list shows up fast.
 
 interface CacheEntry<T> {
   data: T;
@@ -24,7 +24,7 @@ export interface ColumnInfo {
   internalName: string;
   displayName: string;
   type: "choice" | "multiChoice" | "boolean" | "number" | "currency" | "dateTime"
-      | "lookup" | "personOrGroup" | "hyperlinkOrPicture" | "text";
+  | "lookup" | "personOrGroup" | "hyperlinkOrPicture" | "text";
   required: boolean;
   choices?: string[];
   multi?: boolean; // for personOrGroup: can it hold more than one person?
@@ -201,9 +201,30 @@ async function getUserInfoListId(client: AxiosInstance): Promise<string> {
  */
 export async function resolvePersonId(client: AxiosInstance, nameOrEmail: string): Promise<number | null> {
   try {
-    const listId = await getUserInfoListId(client);
+    // Try Graph's /users endpoint first — works when the person is an AAD user
+    // and the app has Sites.Selected (Graph resolves site users from AAD).
+    const encoded = encodeURIComponent(nameOrEmail.trim());
+    const graphRes = await client.get(
+      `/sites/${SITE_ID}/lists?$filter=displayName eq 'User Information List'&$select=id`
+    ).catch(() => null);
+
+    let listId: string | null = null;
+
+    if (graphRes?.data?.value?.length) {
+      listId = graphRes.data.value[0].id;
+    } else {
+      // Fallback: enumerate all lists including hidden ones
+      const allRes = await client.get(`/sites/${SITE_ID}/lists?$select=id,displayName,list`);
+      const match = (allRes.data.value || []).find(
+        (l: any) => (l.displayName || "").toLowerCase() === "user information list"
+      );
+      if (match) listId = match.id;
+    }
+
+    if (!listId) return null;
+
     const res = await client.get(`/sites/${SITE_ID}/lists/${listId}/items`, {
-      params: { $expand: "fields(select=Title,EMail)", $top: 2000 },
+      params: { "$expand": "fields($select=Title,EMail)", "$top": 2000 },
     });
 
     const key = nameOrEmail.trim().toLowerCase();
@@ -216,7 +237,9 @@ export async function resolvePersonId(client: AxiosInstance, nameOrEmail: string
     );
     if (exact) return Number(exact.id);
 
-    const partial = items.find((i: any) => (i.fields?.Title || "").toLowerCase().includes(key));
+    const partial = items.find((i: any) =>
+      (i.fields?.Title || "").toLowerCase().includes(key)
+    );
     return partial ? Number(partial.id) : null;
   } catch {
     return null;

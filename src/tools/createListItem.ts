@@ -35,15 +35,42 @@ function coerceValue(col: ColumnInfo, value: any): any {
     case "boolean":
       if (typeof value === "boolean") return value;
       return String(value).trim().toLowerCase() === "true";
+
     case "number":
     case "currency":
       return typeof value === "number" ? value : Number(value);
+
     case "dateTime": {
       const d = new Date(value);
       return isNaN(d.getTime()) ? value : d.toISOString();
     }
-    case "multiChoice":
-      return Array.isArray(value) ? value : [value];
+
+    case "choice": {
+      // Normalize against known choices (case-insensitive) so "high" matches "High"
+      if (col.choices && col.choices.length > 0) {
+        const strVal = String(value).trim();
+        const match = col.choices.find(
+          (c) => c.toLowerCase() === strVal.toLowerCase()
+        );
+        return match ?? strVal; // use matched casing, or original if not found
+      }
+      return String(value).trim();
+    }
+
+    case "multiChoice": {
+      const arr = Array.isArray(value) ? value : [value];
+      if (col.choices && col.choices.length > 0) {
+        return arr.map((v) => {
+          const strVal = String(v).trim();
+          const match = col.choices!.find(
+            (c) => c.toLowerCase() === strVal.toLowerCase()
+          );
+          return match ?? strVal;
+        });
+      }
+      return arr;
+    }
+
     default:
       return value;
   }

@@ -12,6 +12,7 @@ import { readFile, readFileToolSchema } from "./tools/readFile.js";
 import { createListItem, createListItemToolSchema } from "./tools/createListItem.js";
 import { uploadFile, uploadFileToolSchema } from "./tools/uploadFile.js";
 import { getListItems, getListItemsToolSchema } from "./tools/getListItems.js";
+import { uploadListItemImage, uploadListItemImageToolSchema } from "./tools/uploadListItemImage.js";
 
 dotenv.config();
 
@@ -30,6 +31,7 @@ function createMcpServer(): Server {
       createListItemToolSchema,
       uploadFileToolSchema,
       getListItemsToolSchema,
+      uploadListItemImageToolSchema,
     ],
   }));
 
@@ -77,6 +79,17 @@ function createMcpServer(): Server {
           );
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
+        case "upload_list_item_image": {
+          const result = await uploadListItemImage(
+            (args as any).listName,
+            (args as any).itemId,
+            (args as any).imageFieldName,
+            (args as any).fileName,
+            (args as any).base64Content,
+            (args as any).mimeType
+          );
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
@@ -101,6 +114,7 @@ async function main() {
 
   app.get("/", (_req, res) => {
     res.json({ status: "ok", service: "sharepilot-mcp-server", tools: 5 });
+    res.json({ status: "ok", service: "sharepilot-mcp-server", tools: 6 });
   });
 
   app.post("/mcp", async (req, res) => {
