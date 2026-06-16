@@ -11,7 +11,6 @@ import { searchFile, searchFileToolSchema } from "./tools/searchFile.js";
 import { readFile, readFileToolSchema } from "./tools/readFile.js";
 import { createListItem, createListItemToolSchema } from "./tools/createListItem.js";
 import { uploadFile, uploadFileToolSchema } from "./tools/uploadFile.js";
-import { debugListItem, debugListItemToolSchema } from "./tools/debugListItem.js";
 
 dotenv.config();
 
@@ -29,7 +28,6 @@ function createMcpServer(): Server {
       readFileToolSchema,
       createListItemToolSchema,
       uploadFileToolSchema,
-      debugListItemToolSchema,
     ],
   }));
 
@@ -64,13 +62,6 @@ function createMcpServer(): Server {
             (args as any).filename,
             (args as any).content,
             (args as any).libraryName
-          );
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-        }
-        case "debug_list_item": {
-          const result = await debugListItem(
-            (args as any).listName,
-            (args as any).itemId
           );
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }

@@ -2,9 +2,29 @@ import { getGraphClient } from "../auth/graphClient.js";
 
 const SITE_ID = process.env.SITE_ID || "";
 
+const FIELD_NAME_MAP: Record<string, string> = {
+  "status": "field_2",
+  "priority": "field_3",
+  "duedate": "field_4",
+  "due date": "field_4",
+  "description": "field_5",
+  "percentcomplete": "field_6",
+  "percent complete": "field_6",
+  "isapproved": "field_8",
+  "is approved": "field_8",
+  "taskcategory": "field_9",
+  "task category": "field_9",
+  "departmentname": "field_10",
+  "department name": "field_10",
+  "department": "field_10",
+  "title": "Title",
+};
+
 const KNOWN_LISTS: Record<string, string> = {
   "project tasks": "066a3b58-72a3-4fba-a3fc-3acae90be4bf",
 };
+
+const PROBLEMATIC_FIELDS = new Set(["field_2", "field_3", "field_9", "field_10"]);
 
 export const createListItemToolSchema = {
   name: "create_list_item",
@@ -20,8 +40,15 @@ export const createListItemToolSchema = {
   inputSchema: {
     type: "object",
     properties: {
-      listName: { type: "string", description: "Name of the SharePoint list." },
-      fields: { type: "object", description: "Field name-value pairs.", additionalProperties: true },
+      listName: {
+        type: "string",
+        description: "Name of the SharePoint list, e.g. 'Project Tasks'.",
+      },
+      fields: {
+        type: "object",
+        description: "Field name-value pairs using the field names described above.",
+        additionalProperties: true,
+      },
     },
     required: ["listName", "fields"],
   },
@@ -41,97 +68,68 @@ export async function createListItem(listName: string, fields: Record<string, an
         l.displayName?.toLowerCase() === listKey ||
         l.name?.toLowerCase() === listKey
     );
-    if (!found) throw new Error(`List "${listName}" not found.`);
+    if (!found) {
+      throw new Error(
+        `List "${listName}" not found. Available: ${lists.map((l: any) => l.displayName).join(", ")}`
+      );
+    }
     listId = found.id;
   }
 
-  // Project Tasks: hardcoded known-good field map
-  // field_2=Status, field_3=Priority, field_9=TaskCategory, field_10=DepartmentName
-  // ALL are checkBoxes type → must be sent as string arrays
-  const isProjectTasks = listKey === "project tasks";
+  const allMapped: Record<string, any> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    const internalName = FIELD_NAME_MAP[key.toLowerCase()] || key;
+    allMapped[internalName] = value;
+  }
 
-  let postBody: Record<string, any> = {};
+  const safeFields: Record<string, any> = {};
+  const skippedFields: Record<string, any> = {};
 
-  if (isProjectTasks) {
-    // Map ONLY the fields user provided, nothing else
-    for (const [key, value] of Object.entries(fields)) {
-      const k = key.toLowerCase().replace(/\s/g, "");
-      switch (k) {
-        case "title":
-          postBody["Title"] = String(value); break;
-        case "status":
-          postBody["field_2"] = [String(value)]; break;
-        case "priority":
-          postBody["field_3"] = [String(value)]; break;
-        case "duedate":
-          postBody["field_4"] = String(value); break;
-        case "description":
-          postBody["field_5"] = String(value); break;
-        case "percentcomplete":
-        case "%complete":
-          postBody["field_6"] = Number(value); break;
-        case "isapproved":
-          postBody["field_8"] = Boolean(value); break;
-        case "taskcategory":
-          postBody["field_9"] = [String(value)]; break;
-        case "departmentname":
-        case "department":
-          postBody["field_10"] = [String(value)]; break;
-        default:
-          postBody[key] = value;
-      }
-    }
-  } else {
-    // For other lists: send Title + known fields as plain strings
-    for (const [key, value] of Object.entries(fields)) {
-      postBody[key] = value;
+  for (const [key, value] of Object.entries(allMapped)) {
+    if (PROBLEMATIC_FIELDS.has(key)) {
+      skippedFields[key] = value;
+    } else {
+      safeFields[key] = value;
     }
   }
 
-  // POST
   const res = await client.post(
     `/sites/${SITE_ID}/lists/${listId}/items`,
-    { fields: postBody }
+    { fields: safeFields }
   );
+
   const itemId = res.data.id;
 
-  // Read back to verify
-  const verifyRes = await client.get(
-    `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`
-  );
-  const saved = verifyRes.data;
+  const successfulChoices: Record<string, any> = {};
+  const failedChoices: Record<string, any> = {};
 
-  const unwrap = (v: any) => Array.isArray(v) ? (v.length === 1 ? v[0] : v) : v;
-
-  const verifiedFields: Record<string, any> = {};
-  if (isProjectTasks) {
-    verifiedFields.Title = saved.Title ?? null;
-    verifiedFields.Status = unwrap(saved.field_2) ?? null;
-    verifiedFields.Priority = unwrap(saved.field_3) ?? null;
-    verifiedFields.DueDate = saved.field_4 ?? null;
-    verifiedFields.Description = saved.field_5 ?? null;
-    verifiedFields.PercentComplete = saved.field_6 ?? null;
-    verifiedFields.TaskCategory = unwrap(saved.field_9) ?? null;
-    verifiedFields.DepartmentName = unwrap(saved.field_10) ?? null;
-  } else {
-    for (const key of Object.keys(fields)) {
-      verifiedFields[key] = saved[key] ?? null;
+  for (const [fieldName, value] of Object.entries(skippedFields)) {
+    try {
+      await client.patch(
+        `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
+        { [fieldName]: value }
+      );
+      successfulChoices[fieldName] = value;
+    } catch {
+      try {
+        await client.patch(
+          `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
+          { [fieldName]: [value] }
+        );
+        successfulChoices[fieldName] = [value];
+      } catch {
+        failedChoices[fieldName] = value;
+      }
     }
   }
-
-  const missingFields = Object.entries(verifiedFields)
-    .filter(([_, v]) => v === null || v === undefined || v === "")
-    .map(([k]) => k);
 
   return {
     id: itemId,
-    webUrl: `https://dwivedimanshi12outlook.sharepoint.com/Lists/${listName.replace(/ /g, "%20")}/DispForm.aspx?ID=${itemId}`,
-    listName,
-    status: missingFields.length === 0 ? "fully_created" : "partially_created",
-    verifiedFields,
-    missingFields: missingFields.length > 0 ? missingFields : undefined,
-    note: missingFields.length === 0
-      ? "✅ All fields saved successfully."
-      : `⚠️ Fields not saved: ${missingFields.join(", ")}`,
+    webUrl: res.data.webUrl,
+    listName: listName,
+    fieldsCreated: safeFields,
+    choiceFieldsSet: successfulChoices,
+    choiceFieldsFailed: failedChoices,
+    status: "created",
   };
 }
