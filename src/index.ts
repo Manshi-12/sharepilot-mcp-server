@@ -11,6 +11,7 @@ import { searchFile, searchFileToolSchema } from "./tools/searchFile.js";
 import { readFile, readFileToolSchema } from "./tools/readFile.js";
 import { createListItem, createListItemToolSchema } from "./tools/createListItem.js";
 import { uploadFile, uploadFileToolSchema } from "./tools/uploadFile.js";
+import { getListItems, getListItemsToolSchema } from "./tools/getListItems.js";
 
 dotenv.config();
 
@@ -28,6 +29,7 @@ function createMcpServer(): Server {
       readFileToolSchema,
       createListItemToolSchema,
       uploadFileToolSchema,
+      getListItemsToolSchema,
     ],
   }));
 
@@ -61,7 +63,17 @@ function createMcpServer(): Server {
           const result = await uploadFile(
             (args as any).filename,
             (args as any).content,
-            (args as any).libraryName
+            (args as any).libraryName,
+            (args as any).isBase64,
+            (args as any).mimeType
+          );
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+        case "get_list_items": {
+          const result = await getListItems(
+            (args as any).listName,
+            (args as any).search,
+            (args as any).top
           );
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
@@ -88,7 +100,7 @@ async function main() {
   app.use(express.json());
 
   app.get("/", (_req, res) => {
-    res.json({ status: "ok", service: "sharepilot-mcp-server", tools: 4 });
+    res.json({ status: "ok", service: "sharepilot-mcp-server", tools: 5 });
   });
 
   app.post("/mcp", async (req, res) => {

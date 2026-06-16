@@ -1,52 +1,26 @@
 import { getGraphClient } from "../auth/graphClient.js";
+import { resolveList, getListColumns, findColumn, ColumnInfo } from "../utils/resolve.js";
 
 const SITE_ID = process.env.SITE_ID || "";
-
-const FIELD_NAME_MAP: Record<string, string> = {
-  "status": "field_2",
-  "priority": "field_3",
-  "duedate": "field_4",
-  "due date": "field_4",
-  "description": "field_5",
-  "percentcomplete": "field_6",
-  "percent complete": "field_6",
-  "isapproved": "field_8",
-  "is approved": "field_8",
-  "taskcategory": "field_9",
-  "task category": "field_9",
-  "departmentname": "field_10",
-  "department name": "field_10",
-  "department": "field_10",
-  "title": "Title",
-};
-
-const KNOWN_LISTS: Record<string, string> = {
-  "project tasks": "066a3b58-72a3-4fba-a3fc-3acae90be4bf",
-};
-
-const PROBLEMATIC_FIELDS = new Set(["field_2", "field_3", "field_9", "field_10"]);
 
 export const createListItemToolSchema = {
   name: "create_list_item",
   description:
-    "Creates a new item/row in a SharePoint List. " +
-    "For 'Project Tasks' list use these fields: " +
-    "Title (text, required), Description (text), DueDate (YYYY-MM-DD), " +
-    "PercentComplete (0-100), IsApproved (true/false), " +
-    "Status ('Not started'|'In-Progress'|'Completed'|'Blocked'), " +
-    "Priority ('High'|'Medium'|'Low'), " +
-    "TaskCategory ('Development'|'Testing'|'Design'|'Documentation'|'Meeting'), " +
-    "DepartmentName ('IT'|'HR'|'Finance'|'Marketing'|'Operations').",
+    "Creates a new item/row in any SharePoint List on the site by display name. " +
+    "Field names should match the list's actual column display names (e.g. 'Title', " +
+    "'Priority', 'Due Date'). The server automatically discovers the list's real schema " +
+    "(choice, multi-choice, date, number, yes/no, lookup, person fields) — works for any " +
+    "list, not just one specific one.",
   inputSchema: {
     type: "object",
     properties: {
       listName: {
         type: "string",
-        description: "Name of the SharePoint list, e.g. 'Project Tasks'.",
+        description: "Display name of the SharePoint list, e.g. 'Project Tasks'.",
       },
       fields: {
         type: "object",
-        description: "Field name-value pairs using the field names described above.",
+        description: "Field display-name / value pairs to set on the new item.",
         additionalProperties: true,
       },
     },
@@ -54,82 +28,108 @@ export const createListItemToolSchema = {
   },
 };
 
+/** Coerces a raw value into the shape SharePoint expects for a given column type. */
+function coerceValue(col: ColumnInfo, value: any): any {
+  switch (col.type) {
+    case "boolean":
+      if (typeof value === "boolean") return value;
+      return String(value).trim().toLowerCase() === "true";
+    case "number":
+    case "currency":
+      return typeof value === "number" ? value : Number(value);
+    case "dateTime": {
+      // Accept "YYYY-MM-DD" or a full ISO string; normalize to ISO with time.
+      const d = new Date(value);
+      return isNaN(d.getTime()) ? value : d.toISOString();
+    }
+    case "multiChoice":
+      return Array.isArray(value) ? value : [value];
+    default:
+      return value;
+  }
+}
+
+const CHOICE_TYPES = new Set(["choice", "multiChoice"]);
+
 export async function createListItem(listName: string, fields: Record<string, any>) {
   const client = await getGraphClient();
 
-  const listKey = listName.toLowerCase();
-  let listId = KNOWN_LISTS[listKey];
+  const list = await resolveList(client, listName);
+  const columns = await getListColumns(client, list.id);
 
-  if (!listId) {
-    const listsRes = await client.get(`/sites/${SITE_ID}/lists?$select=id,name,displayName`);
-    const lists = listsRes.data.value || [];
-    const found = lists.find(
-      (l: any) =>
-        l.displayName?.toLowerCase() === listKey ||
-        l.name?.toLowerCase() === listKey
-    );
-    if (!found) {
-      throw new Error(
-        `List "${listName}" not found. Available: ${lists.map((l: any) => l.displayName).join(", ")}`
-      );
+  const safeFields: Record<string, any> = {};      // first-pass POST (non-choice columns)
+  const choiceFields: Record<string, { internalName: string; value: any; type: ColumnInfo["type"] }> = {};
+  const unmatchedFields: Record<string, any> = {};  // keys we couldn't map to any real column
+
+  for (const [key, rawValue] of Object.entries(fields)) {
+    if (key.toLowerCase() === "title") {
+      safeFields["Title"] = rawValue;
+      continue;
     }
-    listId = found.id;
-  }
 
-  const allMapped: Record<string, any> = {};
-  for (const [key, value] of Object.entries(fields)) {
-    const internalName = FIELD_NAME_MAP[key.toLowerCase()] || key;
-    allMapped[internalName] = value;
-  }
+    const col = findColumn(columns, key);
+    if (!col) {
+      unmatchedFields[key] = rawValue;
+      continue;
+    }
 
-  const safeFields: Record<string, any> = {};
-  const skippedFields: Record<string, any> = {};
+    const value = coerceValue(col, rawValue);
 
-  for (const [key, value] of Object.entries(allMapped)) {
-    if (PROBLEMATIC_FIELDS.has(key)) {
-      skippedFields[key] = value;
+    if (CHOICE_TYPES.has(col.type)) {
+      // Choice-type columns frequently 500 when sent in the initial POST (this is the
+      // checkbox-display-type quirk you ran into) — set them in a second PATCH instead.
+      choiceFields[key] = { internalName: col.internalName, value, type: col.type };
     } else {
-      safeFields[key] = value;
+      safeFields[col.internalName] = value;
     }
   }
 
   const res = await client.post(
-    `/sites/${SITE_ID}/lists/${listId}/items`,
+    `/sites/${SITE_ID}/lists/${list.id}/items`,
     { fields: safeFields }
   );
 
   const itemId = res.data.id;
 
-  const successfulChoices: Record<string, any> = {};
-  const failedChoices: Record<string, any> = {};
+  const verifiedFields: Record<string, any> = { ...safeFields };
+  const fieldErrors: Record<string, string> = {};
 
-  for (const [fieldName, value] of Object.entries(skippedFields)) {
+  for (const [displayKey, { internalName, value, type }] of Object.entries(choiceFields)) {
     try {
       await client.patch(
-        `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
-        { [fieldName]: value }
+        `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}/fields`,
+        { [internalName]: value }
       );
-      successfulChoices[fieldName] = value;
+      verifiedFields[displayKey] = value;
     } catch {
+      // Fallback: some choice columns insist on array format even when single-value.
       try {
+        const arrayValue = Array.isArray(value) ? value : [value];
         await client.patch(
-          `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
-          { [fieldName]: [value] }
+          `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}/fields`,
+          { [internalName]: arrayValue }
         );
-        successfulChoices[fieldName] = [value];
-      } catch {
-        failedChoices[fieldName] = value;
+        verifiedFields[displayKey] = arrayValue;
+      } catch (e: any) {
+        fieldErrors[displayKey] = e?.response?.data?.error?.message || e.message || "Failed to set this field.";
       }
     }
   }
 
+  for (const key of Object.keys(unmatchedFields)) {
+    fieldErrors[key] = `No column named "${key}" exists on the "${list.displayName}" list.`;
+  }
+
+  const missingFields = Object.keys(fieldErrors);
+  const status = missingFields.length === 0 ? "fully_created" : "partially_created";
+
   return {
     id: itemId,
     webUrl: res.data.webUrl,
-    listName: listName,
-    fieldsCreated: safeFields,
-    choiceFieldsSet: successfulChoices,
-    choiceFieldsFailed: failedChoices,
-    status: "created",
+    listName: list.displayName,
+    status,
+    verifiedFields,
+    missingFields,
+    fieldErrors,
   };
 }
