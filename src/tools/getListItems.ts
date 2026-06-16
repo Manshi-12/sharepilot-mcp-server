@@ -1,16 +1,14 @@
 import { getGraphClient } from "../auth/graphClient.js";
-import { resolveList, getListColumns } from "../utils/resolve.js";
+import { resolveList } from "../utils/resolve.js";
 
 const SITE_ID = process.env.SITE_ID || "";
 
 export const getListItemsToolSchema = {
   name: "get_list_items",
   description:
-    "Fetches items (rows) from any SharePoint List on the site by its display name — " +
-    "works for any list, not just a specific one. Returns each row's fields using their " +
-    "friendly display names (Title, Status, Priority, Due Date, etc.), with choice, number, " +
-    "date, yes/no, image/hyperlink, lookup and person fields all included. " +
-    "Use this whenever the user asks to see, fetch, list, or summarize data from a SharePoint list.",
+    "Fetches items (rows) from any SharePoint list on the site. " +
+    "Returns human-readable field values — person fields show display names, " +
+    "image fields show direct URLs, lookup fields show their text values.",
   inputSchema: {
     type: "object",
     properties: {
@@ -20,84 +18,136 @@ export const getListItemsToolSchema = {
       },
       search: {
         type: "string",
-        description:
-          "Optional. If provided, only rows where at least one field contains this text " +
-          "(case-insensitive) are returned.",
+        description: "Optional: filter items by a search term (matched against Title).",
       },
       top: {
         type: "number",
-        description: "Optional. Maximum number of rows to return. Defaults to 100.",
+        description: "Optional: max number of items to return (default 20).",
       },
     },
     required: ["listName"],
   },
 };
 
-function isImageOrHyperlinkValue(v: any): boolean {
-  return v && typeof v === "object" && ("Url" in v || "Description" in v);
+/** Parses a SharePoint image field JSON string into a plain URL string. */
+function parseImageField(raw: any): string | null {
+  if (!raw) return null;
+  // If it's already a plain URL string
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      // SharePoint image JSON: { serverUrl, serverRelativeUrl, ... }
+      if (parsed.serverUrl && parsed.serverRelativeUrl) {
+        return parsed.serverUrl + parsed.serverRelativeUrl;
+      }
+      if (parsed.url) return parsed.url;
+    } catch {
+      // Not JSON — might be a raw URL already
+      if (raw.startsWith("http")) return raw;
+    }
+  }
+  if (typeof raw === "object") {
+    if (raw.serverUrl && raw.serverRelativeUrl) return raw.serverUrl + raw.serverRelativeUrl;
+    if (raw.url) return raw.url;
+  }
+  return null;
 }
 
-export async function getListItems(listName: string, search?: string, top: number = 100) {
-  const client = await getGraphClient();
+/** Cleans up a single item's fields into human-readable form. */
+function cleanFields(fields: Record<string, any>): Record<string, any> {
+  const cleaned: Record<string, any> = {};
 
-  const list = await resolveList(client, listName);
-  const columns = await getListColumns(client, list.id);
+  for (const [key, value] of Object.entries(fields)) {
+    // Skip Graph internal bookkeeping fields
+    if (key.startsWith("@") || key === "Edit" || key === "LinkTitleNoMenu" ||
+        key === "LinkTitle" || key === "_UIVersionString" || key === "ItemChildCount" ||
+        key === "FolderChildCount" || key === "appAuthorId" || key === "appEditorId") {
+      continue;
+    }
 
-  // Build internalName -> displayName so the response speaks in friendly field names,
-  // not SharePoint's internal field_2 / field_10 style names.
-  const nameMap = new Map<string, string>();
-  for (const col of columns) nameMap.set(col.internalName, col.displayName);
+    // Person/lookup fields: Graph returns both "AssignedTo" (display name expand)
+    // and "AssignedToLookupId" (numeric ID). Keep only the display name version.
+    if (key.endsWith("LookupId") || key.endsWith("LookupIds")) {
+      continue; // skip raw ID fields — we show the expanded name instead
+    }
 
-  const res = await client.get(
-    `/sites/${SITE_ID}/lists/${list.id}/items`,
-    { params: { $expand: "fields", $top: Math.min(top, 200) } }
-  );
+    // Image fields: Graph returns a JSON string — parse it to a clean URL
+    if (typeof value === "string" && value.includes("serverRelativeUrl")) {
+      const url = parseImageField(value);
+      cleaned[key] = url ?? value;
+      continue;
+    }
 
-  const rawItems = res.data.value || [];
-  const searchLower = search?.toLowerCase();
-
-  const items = rawItems
-    .map((item: any) => {
-      const fields = item.fields || {};
-      const cleaned: Record<string, any> = {};
-
-      for (const [internalName, value] of Object.entries(fields)) {
-        // Skip Graph/SharePoint bookkeeping fields nobody asked for.
-        if (
-          internalName.startsWith("@") ||
-          ["ContentType", "Attachments", "Edit", "LinkTitle", "LinkTitleNoMenu", "ItemChildCount", "FolderChildCount", "_ComplianceFlags", "_ComplianceTag", "_ComplianceTagWrittenTime", "_ComplianceTagUserId", "AppAuthor", "AppEditor"].includes(internalName)
-        ) {
-          continue;
-        }
-
-        const displayName = nameMap.get(internalName) || internalName;
-
-        // Image / hyperlink columns come back as { Description, Url } objects — keep them
-        // structured rather than dropping or mangling them (fixes requirement: image fields
-        // should be retrievable too).
-        if (isImageOrHyperlinkValue(value)) {
-          cleaned[displayName] = { url: (value as any).Url, label: (value as any).Description };
-        } else {
-          cleaned[displayName] = value;
-        }
+    // Person fields expanded by Graph come as objects with { LookupValue, Email, ... }
+    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+      if (value.LookupValue) {
+        cleaned[key] = value.LookupValue;
+        continue;
       }
+      if (value.Title) {
+        cleaned[key] = value.Title;
+        continue;
+      }
+    }
 
-      return {
-        id: item.id,
-        webUrl: item.webUrl,
-        fields: cleaned,
-      };
-    })
-    .filter((item: any) => {
-      if (!searchLower) return true;
-      return Object.values(item.fields).some((v) =>
-        String(v ?? "").toLowerCase().includes(searchLower)
+    // Array of person/lookup objects
+    if (Array.isArray(value)) {
+      cleaned[key] = value.map((v: any) =>
+        typeof v === "object" ? (v.LookupValue || v.Title || v.Email || JSON.stringify(v)) : v
       );
-    });
+      continue;
+    }
+
+    cleaned[key] = value;
+  }
+
+  return cleaned;
+}
+
+export async function getListItems(
+  listName: string,
+  search?: string,
+  top: number = 20
+) {
+  const client = await getGraphClient();
+  const list = await resolveList(client, listName);
+
+  // Get columns to identify person and image fields for proper $expand
+  const colsRes = await client.get(`/sites/${SITE_ID}/lists/${list.id}/columns`);
+  const columns = colsRes.data.value || [];
+
+  // Build $expand for person/lookup fields so Graph returns display names
+  const personCols = columns
+    .filter((c: any) => c.personOrGroup || c.lookup)
+    .map((c: any) => c.name);
+
+  let expandParam = "fields";
+  if (personCols.length > 0) {
+    // Expand person fields so we get LookupValue (display name) not just numeric IDs
+    expandParam = `fields($expand=${personCols.join(",")})`;
+  }
+
+  const params: Record<string, any> = {
+    $expand: expandParam,
+    $top: top,
+  };
+
+  if (search) {
+    params.$filter = `startswith(fields/Title,'${search}')`;
+  }
+
+  const res = await client.get(`/sites/${SITE_ID}/lists/${list.id}/items`, { params });
+  const items = res.data.value || [];
+
+  const cleaned = items.map((item: any) => ({
+    id: item.id,
+    webUrl: item.webUrl,
+    fields: cleanFields(item.fields || {}),
+  }));
 
   return {
     listName: list.displayName,
-    matchCount: items.length,
-    items,
+    totalReturned: cleaned.length,
+    items: cleaned,
   };
 }
