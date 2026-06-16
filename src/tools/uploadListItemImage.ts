@@ -87,18 +87,16 @@ export async function uploadListItemImage(
   );
 
   const uploadedItem = uploadRes.data;
-  const serverRelativeUrl: string = uploadedItem.webUrl
-    ? new URL(uploadedItem.webUrl).pathname
-    : `/sites/${SITE_ID}/SiteAssets/${fileName}`;
+  // Extract origin reliably — always from the uploaded item's webUrl
+  const uploadedWebUrl: string = uploadedItem.webUrl || "";
+  const serverUrl = uploadedWebUrl
+    ? new URL(uploadedWebUrl).origin   // e.g. https://dwivedimanshi12outlook.sharepoint.com
+    : (SITE_URL ? new URL(SITE_URL).origin : "");
 
-  // Extract just the origin (e.g. https://yourorg.sharepoint.com)
-  const serverUrl = SITE_URL
-    ? new URL(SITE_URL).origin
-    : uploadedItem.webUrl
-    ? new URL(uploadedItem.webUrl).origin
-    : "";
+  const serverRelativeUrl: string = uploadedWebUrl
+    ? new URL(uploadedWebUrl).pathname  // e.g. /sites/YourSite/Site Assets/photo.jpg
+    : `/${fileName}`;
 
-  // Step 4: Patch the list item's image field with the SharePoint thumbnail JSON
   const imageFieldValue = {
     type: "thumbnail",
     fileName: fileName,
