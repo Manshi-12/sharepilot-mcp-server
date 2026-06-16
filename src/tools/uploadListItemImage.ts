@@ -2,13 +2,13 @@ import { getGraphClient } from "../auth/graphClient.js";
 import { resolveList, resolveDrive } from "../utils/resolve.js";
 
 const SITE_ID = process.env.SITE_ID || "";
-const SITE_URL = process.env.SITE_URL || ""; // e.g. https://yourorg.sharepoint.com/sites/YourSite
 
 export const uploadListItemImageToolSchema = {
   name: "upload_list_item_image",
   description:
     "Uploads an image (as base64) and attaches it to an Image column on a SharePoint list item. " +
-    "First uploads the image file to the Site Assets library, then sets the Image field on the specified item.",
+    "First uploads the image file to the Site Assets library, then sets the Image field on the specified item. " +
+    "The fileName must be a simple name with no spaces, e.g. 'photo.jpg' or 'task_image.png'.",
   inputSchema: {
     type: "object",
     properties: {
@@ -22,11 +22,11 @@ export const uploadListItemImageToolSchema = {
       },
       imageFieldName: {
         type: "string",
-        description: "Display name of the Image column, e.g. 'Thumbnail' or 'ProjectImage'.",
+        description: "Display name of the Image column, e.g. 'TaskImage'.",
       },
       fileName: {
         type: "string",
-        description: "Filename with extension, e.g. 'photo.jpg'.",
+        description: "Filename with extension and NO spaces, e.g. 'photo.jpg' or 'ayush_shah.png'.",
       },
       base64Content: {
         type: "string",
@@ -41,6 +41,11 @@ export const uploadListItemImageToolSchema = {
   },
 };
 
+/** Sanitizes a filename — replaces spaces/special chars with underscores, keeps extension. */
+function sanitizeFileName(name: string): string {
+  return name.trim().replace(/\s+/g, "_").replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
 export async function uploadListItemImage(
   listName: string,
   itemId: string,
@@ -51,7 +56,10 @@ export async function uploadListItemImage(
 ) {
   const client = await getGraphClient();
 
-  // Step 1: Resolve the list to get its ID
+  // Always sanitize filename — no spaces allowed in SharePoint image field paths
+  const safeFileName = sanitizeFileName(fileName);
+
+  // Step 1: Resolve the list
   const list = await resolveList(client, listName);
 
   // Step 2: Find the image column's internal name
@@ -70,13 +78,18 @@ export async function uploadListItemImage(
   }
   const internalName = imageCol.name;
 
-  // Step 3: Upload the image to Site Assets library
-  const drive = await resolveDrive(client, "Site Assets");
+  // Step 3: Upload image to Site Assets library
+  let drive;
+  try {
+    drive = await resolveDrive(client, "Site Assets");
+  } catch {
+    drive = await resolveDrive(client, "Documents");
+  }
+
   const imageBuffer = Buffer.from(base64Content, "base64");
 
-  // Use the Graph upload session for reliability
   const uploadRes = await client.put(
-    `/drives/${drive.id}/root:/${fileName}:/content`,
+    `/drives/${drive.id}/root:/${safeFileName}:/content`,
     imageBuffer,
     {
       headers: {
@@ -87,27 +100,32 @@ export async function uploadListItemImage(
   );
 
   const uploadedItem = uploadRes.data;
+
+  // Step 4: Build serverUrl and serverRelativeUrl from Graph's response
+  // Graph returns webUrl like: https://tenant.sharepoint.com/sites/Site/Site Assets/file.png
+  // We need: serverUrl = https://tenant.sharepoint.com
+  //          serverRelativeUrl = /sites/Site/Site Assets/file.png  (URL-decoded)
   const uploadedWebUrl: string = uploadedItem.webUrl || "";
   if (!uploadedWebUrl) {
-    throw new Error("Upload succeeded but Graph did not return a webUrl. Cannot set image field.");
+    throw new Error(
+      "Upload succeeded but Graph did not return a webUrl. Cannot set image field."
+    );
   }
 
   const parsedUrl = new URL(uploadedWebUrl);
-  const serverUrl = parsedUrl.origin;
-  const serverRelativeUrl = parsedUrl.pathname;
+  const serverUrl = parsedUrl.origin; // https://dwivedimanshi12outlook.sharepoint.com
+  // pathname is already URL-decoded by the URL constructor — this is correct for SharePoint
+  const serverRelativeUrl = decodeURIComponent(parsedUrl.pathname);
 
+  // Step 5: Build the thumbnail JSON SharePoint expects for image columns
   const imageFieldValue = {
     type: "thumbnail",
-    fileName: fileName,
+    fileName: safeFileName,
     serverUrl: serverUrl,
     serverRelativeUrl: serverRelativeUrl,
   };
 
-  await client.patch(
-    `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}/fields`,
-    { [internalName]: JSON.stringify(imageFieldValue) }
-  );
-
+  // Step 6: Patch the list item's image field — only once
   await client.patch(
     `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}/fields`,
     { [internalName]: JSON.stringify(imageFieldValue) }
@@ -118,7 +136,8 @@ export async function uploadListItemImage(
     itemId,
     listName: list.displayName,
     imageField: imageFieldName,
-    uploadedTo: uploadedItem.webUrl,
+    uploadedTo: uploadedWebUrl,
+    imageUrl: serverUrl + serverRelativeUrl,
     imageFieldValue,
   };
 }
