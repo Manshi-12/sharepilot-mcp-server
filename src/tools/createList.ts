@@ -121,7 +121,19 @@ export async function createList(
         },
     };
 
-    const createResponse = await client.post(`/sites/${SITE_ID}/lists`, listBody);
+    let createResponse: any;
+    try {
+        createResponse = await client.post(`/sites/${SITE_ID}/lists`, listBody);
+    } catch (err: any) {
+        const code = err?.response?.data?.error?.code || "";
+        const msg = err?.response?.data?.error?.message || err.message;
+        if (code === "nameAlreadyExists") {
+            throw new Error(
+                `A list or library named "${displayName}" already exists on this site. Please choose a different name.`
+            );
+        }
+        throw new Error(`Failed to create list: ${msg}`);
+    }
     const created = createResponse.data;
 
     const listId: string = created.id;

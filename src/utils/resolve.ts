@@ -73,8 +73,7 @@ export async function resolveDrive(client: AxiosInstance, libraryName: string): 
   if (partial) return partial;
 
   throw new Error(
-    `Document library "${libraryName}" was not found on this site. ` +
-    `Available libraries: ${drives.map((d) => d.name).join(", ") || "(none found)"}`
+    `Document library "${libraryName}" was not found on this site. Please check the name and try again.`
   );
 }
 
@@ -110,8 +109,7 @@ export async function resolveList(client: AxiosInstance, listName: string): Prom
   if (partial) return partial;
 
   throw new Error(
-    `List "${listName}" was not found on this site. ` +
-    `Available lists: ${lists.map((l) => l.displayName).join(", ") || "(none found)"}`
+    `List "${listName}" was not found on this site. Please check the name and try again.`
   );
 }
 
