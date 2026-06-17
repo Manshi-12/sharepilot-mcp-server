@@ -1,5 +1,5 @@
 import { getGraphClient } from "../auth/graphClient.js";
-import { resolveList, resolveDrive } from "../utils/resolve.js";
+import { resolveList, resolveDrive, parseImageFieldValue } from "../utils/resolve.js";
 
 const SITE_ID = process.env.SITE_ID || "";
 
@@ -125,19 +125,33 @@ export async function uploadListItemImage(
     serverRelativeUrl: serverRelativeUrl,
   };
 
-  // Step 6: Patch the list item's image field — only once
+  // Step 6: Patch the list item's image field
   await client.patch(
     `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}/fields`,
     { [internalName]: JSON.stringify(imageFieldValue) }
   );
+
+  // Step 7: IMPORTANT — SharePoint silently rewrites Thumbnail-column values after
+  // you set them (it copies the image into its own "Reserved_ImageAttachment_..."
+  // asset). Re-read the field now so we report the URL that's ACTUALLY stored,
+  // not the pre-mutation guess from step 4 — those can differ, and reporting the
+  // wrong one is exactly what made the link look broken before.
+  const verifyRes = await client.get(
+    `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}`,
+    { params: { $expand: `fields(select=${internalName})` } }
+  );
+  const finalRawValue = verifyRes.data.fields?.[internalName];
+  const finalImage = parseImageFieldValue(finalRawValue);
 
   return {
     success: true,
     itemId,
     listName: list.displayName,
     imageField: imageFieldName,
-    uploadedTo: uploadedWebUrl,
-    imageUrl: serverUrl + serverRelativeUrl,
-    imageFieldValue,
+    imageUrl: finalImage?.url || (serverUrl + serverRelativeUrl),
+    note:
+      "This URL points to a file stored in your SharePoint site and requires being " +
+      "signed into that SharePoint tenant to open — it will not preview inline in chat. " +
+      "Share it as a clickable link, not an embedded image.",
   };
 }

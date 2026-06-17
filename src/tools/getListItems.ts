@@ -1,5 +1,5 @@
 import { getGraphClient } from "../auth/graphClient.js";
-import { resolveList, getListColumns, resolvePersonId } from "../utils/resolve.js";
+import { resolveList, getListColumns, parseImageFieldValue } from "../utils/resolve.js";
 
 const SITE_ID = process.env.SITE_ID || "";
 const SITE_URL = process.env.SITE_URL || "";
@@ -33,42 +33,6 @@ export const getListItemsToolSchema = {
     required: ["listName"],
   },
 };
-
-/**
- * SharePoint image columns are stored as a JSON string like:
- * "{\"type\":\"thumbnail\",\"fileName\":\"...\",\"serverUrl\":\"...\",\"serverRelativeUrl\":\"...\"}"
- * This parses that string and returns a clean direct URL.
- */
-function parseSharePointImageField(raw: any): string | null {
-  if (!raw) return null;
-
-  // It arrives as a string from Graph
-  if (typeof raw === "string") {
-    // First check: is it the JSON thumbnail format?
-    if (raw.includes("serverRelativeUrl") || raw.includes("serverUrl")) {
-      try {
-        const parsed = JSON.parse(raw);
-        if (parsed.serverUrl && parsed.serverRelativeUrl) {
-          return parsed.serverUrl + parsed.serverRelativeUrl;
-        }
-      } catch {
-        // not valid JSON, fall through
-      }
-    }
-    // Second check: plain URL string
-    if (raw.startsWith("http")) return raw;
-  }
-
-  // Already an object (shouldn't happen for image columns but handle it)
-  if (typeof raw === "object" && raw !== null) {
-    if (raw.serverUrl && raw.serverRelativeUrl) {
-      return raw.serverUrl + raw.serverRelativeUrl;
-    }
-    if (raw.Url) return raw.Url;
-  }
-
-  return null;
-}
 
 /**
  * Builds the human-readable SharePoint list item display URL.
@@ -176,19 +140,12 @@ export async function getListItems(listName: string, search?: string, top: numbe
 
         // --- Image fields ---
         // SharePoint image columns store a JSON string with serverUrl + serverRelativeUrl.
-        // We detect this by checking the raw string content, not column type.
+        // Uses the SAME parser as upload_list_item_image so both tools always agree.
         if (typeof value === "string" && value.includes("serverRelativeUrl")) {
-          try {
-            const parsed = JSON.parse(value);
-            if (parsed.serverUrl && parsed.serverRelativeUrl) {
-              cleaned[displayName] = {
-                imageUrl: parsed.serverUrl + parsed.serverRelativeUrl,
-                fileName: parsed.fileName || "",
-              };
-              continue;
-            }
-          } catch {
-            // not valid JSON, fall through
+          const parsedImage = parseImageFieldValue(value);
+          if (parsedImage) {
+            cleaned[displayName] = { imageUrl: parsedImage.url, fileName: parsedImage.fileName };
+            continue;
           }
         }
 

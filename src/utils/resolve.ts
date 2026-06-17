@@ -245,3 +245,43 @@ export async function resolvePersonId(client: AxiosInstance, nameOrEmail: string
     return null;
   }
 }
+
+// ---------- Image / Thumbnail field parsing ----------
+// SharePoint Image (Thumbnail) columns store their value as a JSON STRING shaped like
+// {"type":"thumbnail","fileName":"...","serverUrl":"...","serverRelativeUrl":"..."}.
+// IMPORTANT: SharePoint silently rewrites this value server-side after you PATCH it —
+// it copies your file into its own "Reserved_ImageAttachment_..." asset and points the
+// field there instead. Always re-read the field after writing it rather than trusting
+// the URL you uploaded to — this single parser is used everywhere so both the upload
+// tool and the read tool always agree on what a stored image value actually means.
+
+export interface ParsedImage {
+  url: string;
+  fileName: string;
+}
+
+export function parseImageFieldValue(raw: any): ParsedImage | null {
+  if (!raw) return null;
+
+  let value = raw;
+  if (typeof raw === "string") {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      // Not JSON — maybe it's already a plain URL string.
+      if (raw.startsWith("http")) return { url: raw, fileName: "" };
+      return null;
+    }
+  }
+
+  if (value && typeof value === "object") {
+    if (value.serverUrl && value.serverRelativeUrl) {
+      return { url: value.serverUrl + value.serverRelativeUrl, fileName: value.fileName || "" };
+    }
+    if (value.Url) {
+      return { url: value.Url, fileName: value.Description || "" };
+    }
+  }
+
+  return null;
+}
