@@ -138,7 +138,7 @@ export async function uploadListItemImage(
   // wrong one is exactly what made the link look broken before.
   const verifyRes = await client.get(
     `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}`,
-    { params: { $expand: `fields(select=${internalName})` } }
+    { params: { $expand: `fields($select=${internalName})` } }
   );
   const finalRawValue = verifyRes.data.fields?.[internalName];
   const finalImage = parseImageFieldValue(finalRawValue);
