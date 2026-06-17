@@ -13,6 +13,8 @@ import { createListItem, createListItemToolSchema } from "./tools/createListItem
 import { uploadFile, uploadFileToolSchema } from "./tools/uploadFile.js";
 import { getListItems, getListItemsToolSchema } from "./tools/getListItems.js";
 import { uploadListItemImage, uploadListItemImageToolSchema } from "./tools/uploadListItemImage.js";
+import { createList, createListToolSchema } from "./tools/createList.js";
+
 
 dotenv.config();
 
@@ -32,6 +34,7 @@ function createMcpServer(): Server {
       uploadFileToolSchema,
       getListItemsToolSchema,
       uploadListItemImageToolSchema,
+      createListToolSchema,
     ],
   }));
 
@@ -87,6 +90,15 @@ function createMcpServer(): Server {
             (args as any).fileName,
             (args as any).base64Content,
             (args as any).mimeType
+          );
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+        case "create_list": {
+          const result = await createList(
+            (args as any).displayName,
+            (args as any).template,
+            (args as any).description,
+            (args as any).columns
           );
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }

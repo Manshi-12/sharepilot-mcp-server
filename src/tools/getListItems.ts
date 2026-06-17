@@ -61,7 +61,7 @@ export async function getListItems(listName: string, search?: string, top: numbe
   // Fetch all items — $expand: fields gives us all field values
   const res = await client.get(
     `/sites/${SITE_ID}/lists/${list.id}/items`,
-    { params: { $expand: "fields", $top: Math.min(top, 200) } }
+    { params: { $expand: "fields", $top: 200 } }
   );
 
   const rawItems = res.data.value || [];
@@ -184,7 +184,8 @@ export async function getListItems(listName: string, search?: string, top: numbe
       return Object.values(item.fields).some((v) =>
         String(v ?? "").toLowerCase().includes(searchLower)
       );
-    });
+    })
+    .slice(0, top);
 
   return {
     listName: list.displayName,
