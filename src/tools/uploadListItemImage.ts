@@ -46,6 +46,14 @@ function sanitizeFileName(name: string): string {
   return name.trim().replace(/\s+/g, "_").replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
+function stripDataUriPrefix(content: string): string {
+  const commaIndex = content.indexOf(",");
+  if (content.startsWith("data:") && commaIndex !== -1) {
+    return content.slice(commaIndex + 1);
+  }
+  return content;
+}
+
 export async function uploadListItemImage(
   listName: string,
   itemId: string,
@@ -86,7 +94,7 @@ export async function uploadListItemImage(
     drive = await resolveDrive(client, "Documents");
   }
 
-  const imageBuffer = Buffer.from(base64Content, "base64");
+  const imageBuffer = Buffer.from(stripDataUriPrefix(base64Content), "base64");
 
   const uploadRes = await client.put(
     `/drives/${drive.id}/root:/${safeFileName}:/content`,
