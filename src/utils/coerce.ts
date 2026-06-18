@@ -73,6 +73,28 @@ export function coerceValue(col: ColumnInfo, value: any): any {
       return arr;
     }
 
+    case "hyperlinkOrPicture": {
+      // Graph requires the exact capitalized keys "Url" and "Description" —
+      // accept a plain URL string or an object in any casing the caller used
+      // (url/Url/URL, description/Description/label) and normalize it.
+      if (typeof value === "string") {
+        return { Url: value, Description: value };
+      }
+      if (value && typeof value === "object") {
+        const url = value.Url || value.url || value.URL;
+        const description = value.Description || value.description || value.label || value.Label || url;
+        if (!url) {
+          throw new Error(
+            `Column "${col.displayName}" needs a URL — pass a link string, or an object with a "url" property.`
+          );
+        }
+        return { Url: url, Description: description };
+      }
+      throw new Error(
+        `Column "${col.displayName}" needs a URL — pass a link string, or an object with a "url" property.`
+      );
+    }
+
     default:
       return value;
   }

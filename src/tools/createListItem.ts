@@ -34,9 +34,14 @@ async function patchField(
   client: any,
   listId: string,
   itemId: string,
-  body: Record<string, any>
+  body: Record<string, any>,
+  extraHeaders?: Record<string, string>
 ): Promise<void> {
-  await client.patch(`/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`, body);
+  await client.patch(
+    `/sites/${SITE_ID}/lists/${listId}/items/${itemId}/fields`,
+    body,
+    extraHeaders ? { headers: extraHeaders } : undefined
+  );
 }
 
 export async function createListItem(listName: string, fields: Record<string, any>) {
@@ -114,7 +119,12 @@ export async function createListItem(listName: string, fields: Record<string, an
     }
 
     try {
-      await patchField(client, list.id, itemId, { [col.internalName]: value });
+      // Graph silently rejects hyperlink/picture field writes unless this
+      // header is present — it's a documented Graph quirk, not optional.
+      const extraHeaders =
+        col.type === "hyperlinkOrPicture" ? { Prefer: "apiversion=2.1" } : undefined;
+
+      await patchField(client, list.id, itemId, { [col.internalName]: value }, extraHeaders);
       verifiedFields[key] = value;
     } catch (firstError: any) {
       // Checkbox-style choice columns may need array — retry once

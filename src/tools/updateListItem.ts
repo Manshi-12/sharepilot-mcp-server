@@ -99,9 +99,17 @@ export async function updateListItem(
     }
 
     try {
+      // Graph silently rejects hyperlink/picture field writes unless this
+      // header is present — it's a documented Graph quirk, not optional.
+      const patchConfig =
+        col.type === "hyperlinkOrPicture"
+          ? { headers: { Prefer: "apiversion=2.1" } }
+          : undefined;
+
       await client.patch(
         `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}/fields`,
-        { [col.internalName]: value }
+        { [col.internalName]: value },
+        patchConfig
       );
       verifiedFields[key] = value;
     } catch (firstError: any) {
