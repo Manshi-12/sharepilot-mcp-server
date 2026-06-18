@@ -1,7 +1,8 @@
-import { getGraphClient } from "../auth/graphClient.js";
+import { getGraphClient, getAccessToken } from "../auth/graphClient.js";
 import { resolveList, resolveDrive, parseImageFieldValue } from "../utils/resolve.js";
 
 const SITE_ID = process.env.SITE_ID || "";
+const SITE_URL = process.env.SITE_URL || "";
 
 export const uploadListItemImageToolSchema = {
   name: "upload_list_item_image",
@@ -80,14 +81,13 @@ export async function uploadListItemImage(
   );
   if (!imageCol) {
     throw new Error(
-      `Image column "${imageFieldName}" not found on list "${listName}". ` +
-      `Available columns: ${columns.map((c: any) => c.displayName).join(", ")}`
+      `Image column "${imageFieldName}" not found on list "${listName}".`
     );
   }
   const internalName = imageCol.name;
 
   // Step 3: Upload image to Site Assets library
-  let drive;
+  let drive: any;
   try {
     drive = await resolveDrive(client, "Site Assets");
   } catch {
@@ -110,9 +110,6 @@ export async function uploadListItemImage(
   const uploadedItem = uploadRes.data;
 
   // Step 4: Build serverUrl and serverRelativeUrl from Graph's response
-  // Graph returns webUrl like: https://tenant.sharepoint.com/sites/Site/Site Assets/file.png
-  // We need: serverUrl = https://tenant.sharepoint.com
-  //          serverRelativeUrl = /sites/Site/Site Assets/file.png  (URL-decoded)
   const uploadedWebUrl: string = uploadedItem.webUrl || "";
   if (!uploadedWebUrl) {
     throw new Error(
@@ -122,7 +119,6 @@ export async function uploadListItemImage(
 
   const parsedUrl = new URL(uploadedWebUrl);
   const serverUrl = parsedUrl.origin; // https://dwivedimanshi12outlook.sharepoint.com
-  // pathname is already URL-decoded by the URL constructor — this is correct for SharePoint
   const serverRelativeUrl = decodeURIComponent(parsedUrl.pathname);
 
   // Step 5: Build the thumbnail JSON SharePoint expects for image columns
@@ -133,17 +129,44 @@ export async function uploadListItemImage(
     serverRelativeUrl: serverRelativeUrl,
   };
 
-  // Step 6: Patch the list item's image field
-  await client.patch(
-    `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}/fields`,
-    { [internalName]: JSON.stringify(imageFieldValue) }
-  );
+  // Step 6: Use SharePoint REST API validateUpdateListItem to set the image field.
+  // WHY NOT Graph PATCH: Graph PATCH accepts the JSON string without error but
+  // SharePoint internally cannot resolve the image from it — the column stays
+  // broken/empty in the UI. validateUpdateListItem is how SharePoint's own UI
+  // sets thumbnail columns and is the only reliable way to do it via API.
+  const token = await getAccessToken();
 
-  // Step 7: IMPORTANT — SharePoint silently rewrites Thumbnail-column values after
-  // you set them (it copies the image into its own "Reserved_ImageAttachment_..."
-  // asset). Re-read the field now so we report the URL that's ACTUALLY stored,
-  // not the pre-mutation guess from step 4 — those can differ, and reporting the
-  // wrong one is exactly what made the link look broken before.
+  const restUrl = `${SITE_URL}/_api/lists/getbytitle('${encodeURIComponent(list.displayName)}')/items(${itemId})/validateUpdateListItem`;
+
+  const restResponse = await fetch(restUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json;odata=verbose",
+      Accept: "application/json;odata=verbose",
+    },
+    body: JSON.stringify({
+      formValues: [
+        {
+          FieldName: internalName,
+          FieldValue: JSON.stringify(imageFieldValue),
+        },
+      ],
+      bNewDocumentUpdate: false,
+      checkInComment: "",
+    }),
+  });
+
+  if (!restResponse.ok) {
+    const errText = await restResponse.text();
+    throw new Error(
+      `Failed to set image field on item ${itemId}: ${restResponse.status} — ${errText}`
+    );
+  }
+
+  // Step 7: Re-read the field to get the URL that SharePoint actually stored.
+  // SharePoint rewrites the thumbnail value server-side after you set it,
+  // so we always re-read rather than trusting the URL we uploaded to.
   const verifyRes = await client.get(
     `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}`,
     { params: { $expand: `fields($select=${internalName})` } }
@@ -158,8 +181,7 @@ export async function uploadListItemImage(
     imageField: imageFieldName,
     imageUrl: finalImage?.url || (serverUrl + serverRelativeUrl),
     note:
-      "This URL points to a file stored in your SharePoint site and requires being " +
-      "signed into that SharePoint tenant to open — it will not preview inline in chat. " +
-      "Share it as a clickable link, not an embedded image.",
+      "Image is now saved and will render correctly in the SharePoint list. " +
+      "You may need to be signed into SharePoint to view the direct link.",
   };
 }
