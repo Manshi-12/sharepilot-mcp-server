@@ -33,10 +33,7 @@ export async function deleteListItem(listName: string, itemId?: string) {
   const list = await resolveList(client, listName);
 
   if (itemId) {
-    // Delete a single item
-    await client.delete(
-      `/sites/${SITE_ID}/lists/${list.id}/items/${itemId}`
-    );
+    await client.delete(`/sites/${SITE_ID}/lists/${list.id}/items/${itemId}`);
     return {
       success: true,
       deleted: "item",
@@ -45,9 +42,7 @@ export async function deleteListItem(listName: string, itemId?: string) {
       message: `Item #${itemId} was permanently deleted from "${list.displayName}".`,
     };
   } else {
-    // Delete the entire list/library
     await client.delete(`/sites/${SITE_ID}/lists/${list.id}`);
-    // Clear cache so the deleted list doesn't appear in future lookups
     clearResolverCache();
     return {
       success: true,

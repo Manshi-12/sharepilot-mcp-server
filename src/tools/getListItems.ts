@@ -1,5 +1,5 @@
 import { getGraphClient } from "../auth/graphClient.js";
-import { resolveList, getListColumns, parseImageFieldValue } from "../utils/resolve.js";
+import { resolveList, getListColumns, parseImageFieldValue, getUserMap } from "../utils/resolve.js";
 
 const SITE_ID = process.env.SITE_ID || "";
 const SITE_URL = process.env.SITE_URL || "";
@@ -34,13 +34,8 @@ export const getListItemsToolSchema = {
   },
 };
 
-/**
- * Builds the human-readable SharePoint list item display URL.
- * Graph's webUrl returns a .000 file download — this is the correct form URL.
- */
 function buildItemDisplayUrl(listInternalName: string, itemId: string): string {
   if (!SITE_URL) return "";
-  // listInternalName from Graph is URL-encoded sometimes, keep as-is
   return `${SITE_URL}/Lists/${listInternalName}/DispForm.aspx?ID=${itemId}`;
 }
 
@@ -50,15 +45,12 @@ export async function getListItems(listName: string, search?: string, top: numbe
   const list = await resolveList(client, listName);
   const columns = await getListColumns(client, list.id);
 
-  // Map internalName → column metadata (for type checking and display names)
   const colMap = new Map<string, typeof columns[0]>();
   for (const col of columns) colMap.set(col.internalName, col);
 
-  // Also build internalName → displayName for fast lookup
   const nameMap = new Map<string, string>();
   for (const col of columns) nameMap.set(col.internalName, col.displayName);
 
-  // Fetch all items — $expand: fields gives us all field values
   const res = await client.get(
     `/sites/${SITE_ID}/lists/${list.id}/items`,
     { params: { $expand: "fields", $top: 200 } }
@@ -66,27 +58,12 @@ export async function getListItems(listName: string, search?: string, top: numbe
 
   const rawItems = res.data.value || [];
 
-  // Pre-fetch User Information List once to resolve person IDs to names
-  // We do this by fetching items from the User Information List
-  let userMap = new Map<number, string>(); // numeric ID → display name
+  // Fix #9 — use shared cached getUserMap instead of fetching users inline every time
+  let userMap = new Map<number, string>();
   try {
-    const allLists = await client.get(`/sites/${SITE_ID}/lists?$select=id,displayName,list`);
-    const userInfoList = (allLists.data.value || []).find(
-      (l: any) => (l.displayName || "").toLowerCase() === "user information list"
-    );
-    if (userInfoList) {
-      const usersRes = await client.get(
-        `/sites/${SITE_ID}/lists/${userInfoList.id}/items`,
-        { params: { "$expand": "fields($select=Title,EMail)", "$top": 2000 } }
-      );
-      for (const u of usersRes.data.value || []) {
-        const numId = Number(u.id);
-        const name = u.fields?.Title || u.fields?.EMail || `User ${numId}`;
-        userMap.set(numId, name);
-      }
-    }
+    userMap = await getUserMap(client);
   } catch {
-    // If user info list fetch fails, we'll just show IDs — not a fatal error
+    // If user map fails, person fields will show IDs — not fatal
   }
 
   const searchLower = search?.toLowerCase();
@@ -97,7 +74,6 @@ export async function getListItems(listName: string, search?: string, top: numbe
       const cleaned: Record<string, any> = {};
 
       for (const [internalName, value] of Object.entries(fields)) {
-        // Skip Graph/SharePoint internal bookkeeping fields
         if (
           internalName.startsWith("@") ||
           [
@@ -112,10 +88,6 @@ export async function getListItems(listName: string, search?: string, top: numbe
         const displayName = nameMap.get(internalName) || internalName;
         const col = colMap.get(internalName);
 
-        // --- Person/Group fields ---
-        // Graph returns these as numeric IDs in fields (e.g. AssignedToLookupId: 11)
-        // The field itself comes as the raw value; the LookupId variant is separate.
-        // We detect them by column type and resolve to display names.
         if (col?.type === "personOrGroup") {
           if (typeof value === "number") {
             cleaned[displayName] = userMap.get(value) ?? `User ${value}`;
@@ -133,14 +105,10 @@ export async function getListItems(listName: string, search?: string, top: numbe
           continue;
         }
 
-        // Skip raw LookupId fields — we already handle person fields above by type
         if (internalName.endsWith("LookupId") || internalName.endsWith("LookupIds")) {
           continue;
         }
 
-        // --- Image fields ---
-        // SharePoint image columns store a JSON string with serverUrl + serverRelativeUrl.
-        // Uses the SAME parser as upload_list_item_image so both tools always agree.
         if (typeof value === "string" && value.includes("serverRelativeUrl")) {
           const parsedImage = parseImageFieldValue(value);
           if (parsedImage) {
@@ -149,7 +117,6 @@ export async function getListItems(listName: string, search?: string, top: numbe
           }
         }
 
-        // hyperlinkOrPicture columns (non-image, plain URL type)
         if (col?.type === "hyperlinkOrPicture") {
           if (value && typeof value === "object" && (value as any).Url) {
             cleaned[displayName] = { url: (value as any).Url, label: (value as any).Description };
@@ -157,7 +124,6 @@ export async function getListItems(listName: string, search?: string, top: numbe
           }
         }
 
-        // --- Hyperlink fields (Url/Description objects) ---
         if (value && typeof value === "object" && ("Url" in value || "Description" in value)) {
           cleaned[displayName] = {
             url: (value as any).Url,
@@ -166,11 +132,9 @@ export async function getListItems(listName: string, search?: string, top: numbe
           continue;
         }
 
-        // Everything else: pass through as-is
         cleaned[displayName] = value;
       }
 
-      // Build proper display URL (not the .000 Graph webUrl)
       const displayUrl = buildItemDisplayUrl(list.name, item.id);
 
       return {

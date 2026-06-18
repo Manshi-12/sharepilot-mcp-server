@@ -1,4 +1,4 @@
-import express from "express";
+import express, { Request, Response, NextFunction } from "express";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
@@ -18,10 +18,43 @@ import { updateListItem, updateListItemToolSchema } from "./tools/updateListItem
 import { deleteListItem, deleteListItemToolSchema } from "./tools/deleteListItem.js";
 import { deleteFile, deleteFileToolSchema } from "./tools/deleteFile.js";
 
-
 dotenv.config();
 
+// ── Fix #16 — Validate all required env vars on startup ───────────────────────
+const REQUIRED_ENV_VARS = ["TENANT_ID", "CLIENT_ID", "CLIENT_SECRET", "SITE_ID", "SITE_URL"];
+const missingVars = REQUIRED_ENV_VARS.filter((v) => !process.env[v]);
+if (missingVars.length > 0) {
+  console.error(
+    `[SharePilot] FATAL: Missing required environment variables: ${missingVars.join(", ")}. ` +
+    `Set them in .env (local) or Azure App Service → Configuration → Application Settings.`
+  );
+  process.exit(1);
+}
+
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+
+// ── Fix #1 — Shared secret auth on /mcp endpoint ─────────────────────────────
+// Set MCP_SECRET in your Azure App Service env vars and in your Foundry MCP config.
+// If MCP_SECRET is not set at all, the check is skipped (dev/local mode).
+const MCP_SECRET = process.env.MCP_SECRET || "";
+
+function mcpAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
+  if (!MCP_SECRET) {
+    // No secret configured — skip check (local dev mode)
+    next();
+    return;
+  }
+  const incoming = req.headers["x-mcp-secret"] || req.headers["authorization"];
+  const token = typeof incoming === "string"
+    ? incoming.replace(/^Bearer\s+/i, "")
+    : "";
+
+  if (token !== MCP_SECRET) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  next();
+}
 
 function createMcpServer(): Server {
   const server = new Server(
@@ -152,11 +185,13 @@ async function main() {
   const app = express();
   app.use(express.json());
 
+  // Fix #12 — correct tool count in health check
   app.get("/", (_req, res) => {
     res.json({ status: "ok", service: "sharepilot-mcp-server", tools: 10 });
   });
 
-  app.post("/mcp", async (req, res) => {
+  // Fix #1 — auth middleware applied only to /mcp
+  app.post("/mcp", mcpAuthMiddleware, async (req, res) => {
     try {
       const server = createMcpServer();
       const transport = new StreamableHTTPServerTransport({
@@ -184,6 +219,11 @@ async function main() {
   app.listen(PORT, () => {
     console.log(`SharePilot MCP server listening on port ${PORT}`);
     console.log(`MCP endpoint: POST http://localhost:${PORT}/mcp`);
+    if (MCP_SECRET) {
+      console.log(`MCP endpoint is protected — x-mcp-secret header required.`);
+    } else {
+      console.log(`WARNING: MCP_SECRET not set — endpoint is unprotected. Set it in production.`);
+    }
   });
 }
 

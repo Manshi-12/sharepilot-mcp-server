@@ -1,8 +1,7 @@
 import { AxiosInstance } from "axios";
 
 const SITE_ID = process.env.SITE_ID || "";
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes — long enough to avoid hammering Graph,
-// short enough that a newly-created library/list shows up fast.
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 interface CacheEntry<T> {
   data: T;
@@ -16,8 +15,8 @@ export interface DriveInfo {
 
 export interface ListInfo {
   id: string;
-  name: string;        // internal name
-  displayName: string; // friendly name users type
+  name: string;
+  displayName: string;
 }
 
 export interface ColumnInfo {
@@ -27,14 +26,16 @@ export interface ColumnInfo {
   | "lookup" | "personOrGroup" | "hyperlinkOrPicture" | "text";
   required: boolean;
   choices?: string[];
-  multi?: boolean; // for personOrGroup: can it hold more than one person?
+  multi?: boolean;
 }
 
 let driveCache: CacheEntry<DriveInfo[]> | null = null;
 let listCache: CacheEntry<ListInfo[]> | null = null;
 const columnCache = new Map<string, CacheEntry<ColumnInfo[]>>();
 
-/** Strips spacing/case/punctuation so "Task Category", "TaskCategory" and "task_category" all match. */
+// Fix #9 — cache the user map so we don't fetch 2000 users on every person field
+let userMapCache: CacheEntry<Map<number, string>> | null = null;
+
 export function normalizeKey(s: string): string {
   return s.trim().toLowerCase().replace(/[\s_-]+/g, "");
 }
@@ -43,9 +44,10 @@ export function clearResolverCache(): void {
   driveCache = null;
   listCache = null;
   columnCache.clear();
+  userMapCache = null;
 }
 
-// ---------- Drives (Document Libraries) ----------
+// ---------- Drives ----------
 
 export async function getAllDrives(client: AxiosInstance): Promise<DriveInfo[]> {
   if (driveCache && driveCache.expiresAt > Date.now()) return driveCache.data;
@@ -57,11 +59,6 @@ export async function getAllDrives(client: AxiosInstance): Promise<DriveInfo[]> 
   return drives;
 }
 
-/**
- * Finds a Document Library by display name. No hardcoded names anywhere —
- * works for any library that currently exists on the site, including ones
- * created after this server was deployed.
- */
 export async function resolveDrive(client: AxiosInstance, libraryName: string): Promise<DriveInfo> {
   const drives = await getAllDrives(client);
   const key = normalizeKey(libraryName);
@@ -84,7 +81,6 @@ export async function getAllLists(client: AxiosInstance): Promise<ListInfo[]> {
 
   const res = await client.get(`/sites/${SITE_ID}/lists?$select=id,name,displayName,list`);
   const lists: ListInfo[] = (res.data.value || [])
-    // Hide system/hidden lists so they never collide with user-named lists.
     .filter((l: any) => !l.list?.hidden)
     .map((l: any) => ({ id: l.id, name: l.name, displayName: l.displayName || l.name }));
 
@@ -92,10 +88,6 @@ export async function getAllLists(client: AxiosInstance): Promise<ListInfo[]> {
   return lists;
 }
 
-/**
- * Finds a List by display name. Works for any list on the site — Project Tasks
- * today, anything else tomorrow — with zero code changes required.
- */
 export async function resolveList(client: AxiosInstance, listName: string): Promise<ListInfo> {
   const lists = await getAllLists(client);
   const key = normalizeKey(listName);
@@ -113,14 +105,8 @@ export async function resolveList(client: AxiosInstance, listName: string): Prom
   );
 }
 
-// ---------- List Columns (schema) ----------
+// ---------- List Columns ----------
 
-/**
- * Reads a list's actual column definitions from Graph and classifies each one
- * by real type (choice / multiChoice / boolean / number / dateTime / lookup /
- * personOrGroup / hyperlinkOrPicture / text). This replaces every hardcoded
- * field_N map — the server now learns the schema of ANY list at runtime.
- */
 export async function getListColumns(client: AxiosInstance, listId: string): Promise<ColumnInfo[]> {
   const cached = columnCache.get(listId);
   if (cached && cached.expiresAt > Date.now()) return cached.data;
@@ -129,7 +115,6 @@ export async function getListColumns(client: AxiosInstance, listId: string): Pro
   const raw = res.data.value || [];
 
   const columns: ColumnInfo[] = raw
-    // Skip Graph's own bookkeeping columns (ContentType, Attachments, etc.)
     .filter((c: any) => !c.readOnly && !c.hidden)
     .map((c: any) => {
       let type: ColumnInfo["type"] = "text";
@@ -163,95 +148,61 @@ export async function getListColumns(client: AxiosInstance, listId: string): Pro
   return columns;
 }
 
-/** Matches a user/agent-supplied field key (e.g. "Task Category") to its column definition. */
 export function findColumn(columns: ColumnInfo[], key: string): ColumnInfo | undefined {
   const k = normalizeKey(key);
   return columns.find((c) => normalizeKey(c.displayName) === k || normalizeKey(c.internalName) === k);
 }
 
 // ---------- Person field resolution ----------
-// SharePoint Person/Group columns need the person's internal numeric site-user ID
-// (set via "{InternalName}LookupId"), not their plain display name. Every SharePoint
-// site has a hidden "User Information List" that's just a normal list under the hood —
-// readable through Graph with the same Sites.Selected permission you already granted —
-// so we look the person up there by name or email instead of needing extra app permissions.
-
-let userInfoListIdCache: { id: string; expiresAt: number } | null = null;
 
 async function getUserInfoListId(client: AxiosInstance): Promise<string> {
-  if (userInfoListIdCache && userInfoListIdCache.expiresAt > Date.now()) return userInfoListIdCache.id;
-
   const res = await client.get(`/sites/${SITE_ID}/lists?$select=id,displayName`);
   const match = (res.data.value || []).find(
     (l: any) => (l.displayName || "").toLowerCase() === "user information list"
   );
   if (!match) throw new Error("Could not locate this site's User Information List.");
-
-  userInfoListIdCache = { id: match.id, expiresAt: Date.now() + CACHE_TTL_MS };
   return match.id;
 }
 
-/**
- * Resolves a person's display name or email to their numeric site-user ID
- * (the value SharePoint Person/Group columns actually need). Returns null —
- * never throws — if no confident match is found, so callers can report a
- * clear per-field error instead of crashing the whole item creation.
- */
+// Fix #9 — build user map once and cache it for 5 minutes
+export async function getUserMap(client: AxiosInstance): Promise<Map<number, string>> {
+  if (userMapCache && userMapCache.expiresAt > Date.now()) return userMapCache.data;
+
+  const listId = await getUserInfoListId(client);
+  const res = await client.get(`/sites/${SITE_ID}/lists/${listId}/items`, {
+    params: { "$expand": "fields($select=Title,EMail)", "$top": 2000 },
+  });
+
+  const map = new Map<number, string>();
+  for (const u of res.data.value || []) {
+    const numId = Number(u.id);
+    const name = u.fields?.Title || u.fields?.EMail || `User ${numId}`;
+    map.set(numId, name);
+  }
+
+  userMapCache = { data: map, expiresAt: Date.now() + CACHE_TTL_MS };
+  return map;
+}
+
 export async function resolvePersonId(client: AxiosInstance, nameOrEmail: string): Promise<number | null> {
   try {
-    // Try Graph's /users endpoint first — works when the person is an AAD user
-    // and the app has Sites.Selected (Graph resolves site users from AAD).
-    const encoded = encodeURIComponent(nameOrEmail.trim());
-    const graphRes = await client.get(
-      `/sites/${SITE_ID}/lists?$filter=displayName eq 'User Information List'&$select=id`
-    ).catch(() => null);
-
-    let listId: string | null = null;
-
-    if (graphRes?.data?.value?.length) {
-      listId = graphRes.data.value[0].id;
-    } else {
-      // Fallback: enumerate all lists including hidden ones
-      const allRes = await client.get(`/sites/${SITE_ID}/lists?$select=id,displayName,list`);
-      const match = (allRes.data.value || []).find(
-        (l: any) => (l.displayName || "").toLowerCase() === "user information list"
-      );
-      if (match) listId = match.id;
-    }
-
-    if (!listId) return null;
-
-    const res = await client.get(`/sites/${SITE_ID}/lists/${listId}/items`, {
-      params: { "$expand": "fields($select=Title,EMail)", "$top": 2000 },
-    });
-
+    const map = await getUserMap(client);
     const key = nameOrEmail.trim().toLowerCase();
-    const items = res.data.value || [];
 
-    const exact = items.find(
-      (i: any) =>
-        (i.fields?.Title || "").toLowerCase() === key ||
-        (i.fields?.EMail || "").toLowerCase() === key
-    );
-    if (exact) return Number(exact.id);
-
-    const partial = items.find((i: any) =>
-      (i.fields?.Title || "").toLowerCase().includes(key)
-    );
-    return partial ? Number(partial.id) : null;
+    for (const [id, name] of map.entries()) {
+      if (name.toLowerCase() === key) return id;
+    }
+    // partial match fallback
+    for (const [id, name] of map.entries()) {
+      if (name.toLowerCase().includes(key)) return id;
+    }
+    return null;
   } catch {
     return null;
   }
 }
 
 // ---------- Image / Thumbnail field parsing ----------
-// SharePoint Image (Thumbnail) columns store their value as a JSON STRING shaped like
-// {"type":"thumbnail","fileName":"...","serverUrl":"...","serverRelativeUrl":"..."}.
-// IMPORTANT: SharePoint silently rewrites this value server-side after you PATCH it —
-// it copies your file into its own "Reserved_ImageAttachment_..." asset and points the
-// field there instead. Always re-read the field after writing it rather than trusting
-// the URL you uploaded to — this single parser is used everywhere so both the upload
-// tool and the read tool always agree on what a stored image value actually means.
 
 export interface ParsedImage {
   url: string;
@@ -266,7 +217,6 @@ export function parseImageFieldValue(raw: any): ParsedImage | null {
     try {
       value = JSON.parse(raw);
     } catch {
-      // Not JSON — maybe it's already a plain URL string.
       if (raw.startsWith("http")) return { url: raw, fileName: "" };
       return null;
     }

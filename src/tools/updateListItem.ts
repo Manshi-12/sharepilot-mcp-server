@@ -6,6 +6,7 @@ import {
   resolvePersonId,
   ColumnInfo,
 } from "../utils/resolve.js";
+import { coerceValue } from "../utils/coerce.js";
 
 const SITE_ID = process.env.SITE_ID || "";
 
@@ -37,61 +38,6 @@ export const updateListItemToolSchema = {
   },
 };
 
-function coerceValue(col: ColumnInfo, value: any): any {
-  switch (col.type) {
-    case "boolean":
-      if (typeof value === "boolean") return value;
-      return String(value).trim().toLowerCase() === "true";
-    case "number":
-    case "currency":
-      return typeof value === "number" ? value : Number(value);
-    case "dateTime": {
-      const d = new Date(value);
-      return isNaN(d.getTime()) ? value : d.toISOString();
-    }
-    case "choice": {
-      if (col.choices && col.choices.length > 0) {
-        const strVal = String(value).trim();
-        const match = col.choices.find(
-          (c) => c.toLowerCase() === strVal.toLowerCase()
-        );
-        if (!match) {
-          throw new Error(
-            `"${strVal}" is not a valid choice for column "${col.displayName}". ` +
-            `Valid options are: ${col.choices.join(", ")}.`
-          );
-        }
-        return match;
-      }
-      return String(value).trim();
-    }
-
-    case "multiChoice": {
-      const arr = Array.isArray(value) ? value : [value];
-      if (col.choices && col.choices.length > 0) {
-        const resolved: string[] = [];
-        for (const v of arr) {
-          const strVal = String(v).trim();
-          const match = col.choices.find(
-            (c) => c.toLowerCase() === strVal.toLowerCase()
-          );
-          if (!match) {
-            throw new Error(
-              `"${strVal}" is not a valid choice for column "${col.displayName}". ` +
-              `Valid options are: ${col.choices.join(", ")}.`
-            );
-          }
-          resolved.push(match);
-        }
-        return resolved;
-      }
-      return arr;
-    }
-    default:
-      return value;
-  }
-}
-
 export async function updateListItem(
   listName: string,
   itemId: string,
@@ -112,7 +58,6 @@ export async function updateListItem(
       continue;
     }
 
-    // Person fields
     if (col.type === "personOrGroup") {
       const rawNames = Array.isArray(rawValue) ? rawValue : [rawValue];
       const resolvedIds: number[] = [];
@@ -144,6 +89,7 @@ export async function updateListItem(
       continue;
     }
 
+    // Validate and coerce before hitting SharePoint
     let value: any;
     try {
       value = coerceValue(col, rawValue);

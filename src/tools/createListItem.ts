@@ -1,5 +1,6 @@
 import { getGraphClient } from "../auth/graphClient.js";
 import { resolveList, getListColumns, findColumn, resolvePersonId, ColumnInfo } from "../utils/resolve.js";
+import { coerceValue } from "../utils/coerce.js";
 
 const SITE_ID = process.env.SITE_ID || "";
 
@@ -29,53 +30,6 @@ export const createListItemToolSchema = {
   },
 };
 
-/** Coerces a raw value into the shape SharePoint expects for a given column type. */
-function coerceValue(col: ColumnInfo, value: any): any {
-  switch (col.type) {
-    case "boolean":
-      if (typeof value === "boolean") return value;
-      return String(value).trim().toLowerCase() === "true";
-
-    case "number":
-    case "currency":
-      return typeof value === "number" ? value : Number(value);
-
-    case "dateTime": {
-      const d = new Date(value);
-      return isNaN(d.getTime()) ? value : d.toISOString();
-    }
-
-    case "choice": {
-      // Normalize against known choices (case-insensitive) so "high" matches "High"
-      if (col.choices && col.choices.length > 0) {
-        const strVal = String(value).trim();
-        const match = col.choices.find(
-          (c) => c.toLowerCase() === strVal.toLowerCase()
-        );
-        return match ?? strVal; // use matched casing, or original if not found
-      }
-      return String(value).trim();
-    }
-
-    case "multiChoice": {
-      const arr = Array.isArray(value) ? value : [value];
-      if (col.choices && col.choices.length > 0) {
-        return arr.map((v) => {
-          const strVal = String(v).trim();
-          const match = col.choices!.find(
-            (c) => c.toLowerCase() === strVal.toLowerCase()
-          );
-          return match ?? strVal;
-        });
-      }
-      return arr;
-    }
-
-    default:
-      return value;
-  }
-}
-
 async function patchField(
   client: any,
   listId: string,
@@ -91,9 +45,6 @@ export async function createListItem(listName: string, fields: Record<string, an
   const list = await resolveList(client, listName);
   const columns = await getListColumns(client, list.id);
 
-  // Pull Title out separately — it's the one field safe to include in the very first
-  // POST that creates the item shell. Every other field is set afterward, one at a
-  // time, so a problem with any single field can never block the rest.
   const titleKey = Object.keys(fields).find((k) => k.toLowerCase() === "title");
   const titleValue = titleKey ? fields[titleKey] : "";
 
@@ -107,7 +58,7 @@ export async function createListItem(listName: string, fields: Record<string, an
     webUrl = res.data.webUrl;
   } catch (e: any) {
     throw new Error(
-      `Could not create the item at all (failed even with just Title set): ` +
+      `Could not create the item (failed even with just Title set): ` +
       (e?.response?.data?.error?.message || e.message)
     );
   }
@@ -124,7 +75,6 @@ export async function createListItem(listName: string, fields: Record<string, an
       continue;
     }
 
-    // Person/Group fields need the site-user's numeric ID, not their name.
     if (col.type === "personOrGroup") {
       const rawNames = Array.isArray(rawValue) ? rawValue : [rawValue];
       const resolvedIds: number[] = [];
@@ -154,6 +104,7 @@ export async function createListItem(listName: string, fields: Record<string, an
       continue;
     }
 
+    // Fix #coerce — validate choices before hitting SharePoint
     let value: any;
     try {
       value = coerceValue(col, rawValue);
@@ -166,6 +117,7 @@ export async function createListItem(listName: string, fields: Record<string, an
       await patchField(client, list.id, itemId, { [col.internalName]: value });
       verifiedFields[key] = value;
     } catch (firstError: any) {
+      // Checkbox-style choice columns may need array — retry once
       if (col.type === "choice" || col.type === "multiChoice") {
         try {
           const arrayValue = Array.isArray(value) ? value : [value];

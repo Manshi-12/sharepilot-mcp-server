@@ -1,5 +1,7 @@
 import { getGraphClient } from "../auth/graphClient.js";
-import { resolveDrive, clearResolverCache } from "../utils/resolve.js";
+import { resolveDrive, getAllLists, clearResolverCache } from "../utils/resolve.js";
+
+const SITE_ID = process.env.SITE_ID || "";
 
 export const deleteFileToolSchema = {
   name: "delete_file",
@@ -31,7 +33,7 @@ export async function deleteFile(libraryName: string, fileId?: string) {
   const drive = await resolveDrive(client, libraryName);
 
   if (fileId) {
-    // Delete a single file
+    // Delete a single file via drive item
     await client.delete(`/drives/${drive.id}/items/${fileId}`);
     return {
       success: true,
@@ -41,10 +43,23 @@ export async function deleteFile(libraryName: string, fileId?: string) {
       message: `File was permanently deleted from "${drive.name}".`,
     };
   } else {
-    // Delete the entire library — libraries are backed by a list in Graph
-    // We delete the drive's root list which removes the library
-    await client.delete(`/drives/${drive.id}`);
+    // Fix #10 — Graph does NOT support DELETE /drives/{id}.
+    // Document libraries are backed by SharePoint lists — delete the backing list instead.
+    const lists = await getAllLists(client);
+    const backingList = lists.find(
+      (l) => l.displayName === drive.name || l.name === drive.name
+    );
+
+    if (!backingList) {
+      throw new Error(
+        `Could not find the backing list for library "${drive.name}". ` +
+        `The library may be a system library that cannot be deleted this way.`
+      );
+    }
+
+    await client.delete(`/sites/${SITE_ID}/lists/${backingList.id}`);
     clearResolverCache();
+
     return {
       success: true,
       deleted: "library",
