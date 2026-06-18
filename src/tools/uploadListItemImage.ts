@@ -1,4 +1,4 @@
-import { getGraphClient, getAccessToken } from "../auth/graphClient.js";
+import { getGraphClient, getSharePointAccessToken } from "../auth/graphClient.js";
 import { resolveList, resolveDrive, parseImageFieldValue } from "../utils/resolve.js";
 
 const SITE_ID = process.env.SITE_ID || "";
@@ -134,7 +134,7 @@ export async function uploadListItemImage(
   // SharePoint internally cannot resolve the image from it — the column stays
   // broken/empty in the UI. validateUpdateListItem is how SharePoint's own UI
   // sets thumbnail columns and is the only reliable way to do it via API.
-  const token = await getAccessToken();
+  const token = await getSharePointAccessToken();
 
   const restUrl = `${SITE_URL}/_api/lists/getbytitle('${encodeURIComponent(list.displayName)}')/items(${itemId})/validateUpdateListItem`;
 

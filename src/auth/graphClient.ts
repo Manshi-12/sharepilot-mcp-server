@@ -7,6 +7,7 @@ dotenv.config();
 const TENANT_ID = process.env.TENANT_ID || "";
 const CLIENT_ID = process.env.CLIENT_ID || "";
 const CLIENT_SECRET = process.env.CLIENT_SECRET || "";
+const SITE_URL = process.env.SITE_URL || "";
 
 let cca: ConfidentialClientApplication | null = null;
 
@@ -80,4 +81,41 @@ export async function getGraphClient(): Promise<AxiosInstance> {
     // Fix #11 — timeout so Graph hangs don't hang the server forever
     timeout: 30000, // 30 seconds
   });
+}
+
+// ── SharePoint REST (_api) token ────────────────────────────────────────────
+// IMPORTANT: this is a DIFFERENT resource/audience than Microsoft Graph.
+// The legacy SharePoint REST endpoints (/_api/...) reject Graph-scoped tokens
+// with a 401. We need a token whose audience is the SharePoint site itself,
+// acquired with scope "<SITE_URL>/.default". Cached separately from the
+// Graph token since they are not interchangeable and expire independently.
+let spTokenCache: TokenCache | null = null;
+
+export async function getSharePointAccessToken(): Promise<string> {
+  if (!SITE_URL) {
+    throw new Error("Missing SITE_URL environment variable — required to acquire a SharePoint REST API token.");
+  }
+
+  if (spTokenCache && spTokenCache.expiresAt - TOKEN_REFRESH_BUFFER_MS > Date.now()) {
+    return spTokenCache.token;
+  }
+
+  const client = getConfidentialClient();
+  const siteOrigin = new URL(SITE_URL).origin; // e.g. https://dwivedimanshi12outlook.sharepoint.com
+
+  const result = await client.acquireTokenByClientCredential({
+    scopes: [`${siteOrigin}/.default`],
+  });
+
+  if (!result || !result.accessToken) {
+    throw new Error("Failed to acquire access token for the SharePoint REST API.");
+  }
+
+  const expiresAt = result.expiresOn
+    ? result.expiresOn.getTime()
+    : Date.now() + 55 * 60 * 1000;
+
+  spTokenCache = { token: result.accessToken, expiresAt };
+
+  return result.accessToken;
 }
