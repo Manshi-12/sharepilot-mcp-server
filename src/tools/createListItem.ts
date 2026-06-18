@@ -154,15 +154,18 @@ export async function createListItem(listName: string, fields: Record<string, an
       continue;
     }
 
-    const value = coerceValue(col, rawValue);
+    let value: any;
+    try {
+      value = coerceValue(col, rawValue);
+    } catch (coerceError: any) {
+      fieldErrors[key] = coerceError.message;
+      continue;
+    }
 
     try {
       await patchField(client, list.id, itemId, { [col.internalName]: value });
       verifiedFields[key] = value;
     } catch (firstError: any) {
-      // Choice columns configured as "checkboxes" in the SharePoint UI behave as
-      // multi-select under the hood even if Graph reports a single value was sent —
-      // retrying with an array is a safe fallback for exactly that quirk.
       if (col.type === "choice" || col.type === "multiChoice") {
         try {
           const arrayValue = Array.isArray(value) ? value : [value];

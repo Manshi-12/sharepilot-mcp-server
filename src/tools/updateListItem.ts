@@ -55,20 +55,35 @@ function coerceValue(col: ColumnInfo, value: any): any {
         const match = col.choices.find(
           (c) => c.toLowerCase() === strVal.toLowerCase()
         );
-        return match ?? strVal;
+        if (!match) {
+          throw new Error(
+            `"${strVal}" is not a valid choice for column "${col.displayName}". ` +
+            `Valid options are: ${col.choices.join(", ")}.`
+          );
+        }
+        return match;
       }
       return String(value).trim();
     }
+
     case "multiChoice": {
       const arr = Array.isArray(value) ? value : [value];
       if (col.choices && col.choices.length > 0) {
-        return arr.map((v) => {
+        const resolved: string[] = [];
+        for (const v of arr) {
           const strVal = String(v).trim();
-          const match = col.choices!.find(
+          const match = col.choices.find(
             (c) => c.toLowerCase() === strVal.toLowerCase()
           );
-          return match ?? strVal;
-        });
+          if (!match) {
+            throw new Error(
+              `"${strVal}" is not a valid choice for column "${col.displayName}". ` +
+              `Valid options are: ${col.choices.join(", ")}.`
+            );
+          }
+          resolved.push(match);
+        }
+        return resolved;
       }
       return arr;
     }
@@ -129,7 +144,13 @@ export async function updateListItem(
       continue;
     }
 
-    const value = coerceValue(col, rawValue);
+    let value: any;
+    try {
+      value = coerceValue(col, rawValue);
+    } catch (coerceError: any) {
+      fieldErrors[key] = coerceError.message;
+      continue;
+    }
 
     try {
       await client.patch(
