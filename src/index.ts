@@ -14,6 +14,9 @@ import { uploadFile, uploadFileToolSchema } from "./tools/uploadFile.js";
 import { getListItems, getListItemsToolSchema } from "./tools/getListItems.js";
 import { uploadListItemImage, uploadListItemImageToolSchema } from "./tools/uploadListItemImage.js";
 import { createList, createListToolSchema } from "./tools/createList.js";
+import { updateListItem, updateListItemToolSchema } from "./tools/updateListItem.js";
+import { deleteListItem, deleteListItemToolSchema } from "./tools/deleteListItem.js";
+import { deleteFile, deleteFileToolSchema } from "./tools/deleteFile.js";
 
 
 dotenv.config();
@@ -35,6 +38,9 @@ function createMcpServer(): Server {
       getListItemsToolSchema,
       uploadListItemImageToolSchema,
       createListToolSchema,
+      updateListItemToolSchema,
+      deleteListItemToolSchema,
+      deleteFileToolSchema,
     ],
   }));
 
@@ -102,6 +108,28 @@ function createMcpServer(): Server {
           );
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
+        case "update_list_item": {
+          const result = await updateListItem(
+            (args as any).listName,
+            (args as any).itemId,
+            (args as any).fields
+          );
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+        case "delete_list_item": {
+          const result = await deleteListItem(
+            (args as any).listName,
+            (args as any).itemId
+          );
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+        case "delete_file": {
+          const result = await deleteFile(
+            (args as any).libraryName,
+            (args as any).fileId
+          );
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
@@ -125,7 +153,7 @@ async function main() {
   app.use(express.json());
 
   app.get("/", (_req, res) => {
-    res.json({ status: "ok", service: "sharepilot-mcp-server", tools: 6 });
+    res.json({ status: "ok", service: "sharepilot-mcp-server", tools: 10 });
   });
 
   app.post("/mcp", async (req, res) => {
