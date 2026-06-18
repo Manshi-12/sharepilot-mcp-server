@@ -6,7 +6,8 @@ dotenv.config();
 
 const TENANT_ID = process.env.TENANT_ID || "";
 const CLIENT_ID = process.env.CLIENT_ID || "";
-const CLIENT_SECRET = process.env.CLIENT_SECRET || "";
+const CLIENT_CERT_THUMBPRINT = process.env.CLIENT_CERT_THUMBPRINT || "";
+const CLIENT_CERT_PRIVATE_KEY_BASE64 = process.env.CLIENT_CERT_PRIVATE_KEY_BASE64 || "";
 const SITE_URL = process.env.SITE_URL || "";
 
 let cca: ConfidentialClientApplication | null = null;
@@ -23,19 +24,29 @@ let tokenCache: TokenCache | null = null;
 const TOKEN_REFRESH_BUFFER_MS = 2 * 60 * 1000; // 2 minutes
 
 function getConfidentialClient(): ConfidentialClientApplication {
-  if (!TENANT_ID || !CLIENT_ID || !CLIENT_SECRET) {
+  if (!TENANT_ID || !CLIENT_ID || !CLIENT_CERT_THUMBPRINT || !CLIENT_CERT_PRIVATE_KEY_BASE64) {
     throw new Error(
-      "Missing TENANT_ID, CLIENT_ID or CLIENT_SECRET environment variables. " +
-      "Set these in .env (local) or Application Settings (Azure App Service)."
+      "Missing TENANT_ID, CLIENT_ID, CLIENT_CERT_THUMBPRINT or CLIENT_CERT_PRIVATE_KEY_BASE64 " +
+      "environment variables. Set these in .env (local) or Application Settings (Azure App Service)."
     );
   }
 
   if (!cca) {
+    // SharePoint's legacy REST API (_api/...) rejects app-only tokens issued with a
+    // client secret ("Unsupported app only token" — appidacr=1). It only accepts
+    // tokens issued with a certificate credential (appidacr=2). Microsoft Graph
+    // accepts either, so using a certificate here covers both Graph and SharePoint
+    // REST calls with one credential.
+    const privateKeyPem = Buffer.from(CLIENT_CERT_PRIVATE_KEY_BASE64, "base64").toString("utf-8");
+
     cca = new ConfidentialClientApplication({
       auth: {
         clientId: CLIENT_ID,
         authority: `https://login.microsoftonline.com/${TENANT_ID}`,
-        clientSecret: CLIENT_SECRET,
+        clientCertificate: {
+          thumbprint: CLIENT_CERT_THUMBPRINT,
+          privateKey: privateKeyPem,
+        },
       },
     });
   }
