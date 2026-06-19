@@ -7,16 +7,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import dotenv from "dotenv";
 
-import { searchFile, searchFileToolSchema } from "./tools/searchFile.js";
-import { readFile, readFileToolSchema } from "./tools/readFile.js";
-import { createListItem, createListItemToolSchema } from "./tools/createListItem.js";
-import { uploadFile, uploadFileToolSchema } from "./tools/uploadFile.js";
-import { getListItems, getListItemsToolSchema } from "./tools/getListItems.js";
-import { uploadListItemImage, uploadListItemImageToolSchema } from "./tools/uploadListItemImage.js";
-import { createList, createListToolSchema } from "./tools/createList.js";
-import { updateListItem, updateListItemToolSchema } from "./tools/updateListItem.js";
-import { deleteListItem, deleteListItemToolSchema } from "./tools/deleteListItem.js";
-import { deleteFile, deleteFileToolSchema } from "./tools/deleteFile.js";
+import { TOOL_SCHEMAS, executeTool } from "./tools/registry.js";
+import { runChatAgent, ChatMessage } from "./chat/agent.js";
 
 dotenv.config();
 
@@ -63,109 +55,15 @@ function createMcpServer(): Server {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [
-      searchFileToolSchema,
-      readFileToolSchema,
-      createListItemToolSchema,
-      uploadFileToolSchema,
-      getListItemsToolSchema,
-      uploadListItemImageToolSchema,
-      createListToolSchema,
-      updateListItemToolSchema,
-      deleteListItemToolSchema,
-      deleteFileToolSchema,
-    ],
+    tools: TOOL_SCHEMAS,
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
     try {
-      switch (name) {
-        case "search_file": {
-          const result = await searchFile(
-            (args as any).filename,
-            (args as any).libraryName
-          );
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-        }
-        case "read_file": {
-          const result = await readFile(
-            (args as any).fileId,
-            (args as any).driveId
-          );
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-        }
-        case "create_list_item": {
-          const result = await createListItem(
-            (args as any).listName,
-            (args as any).fields
-          );
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-        }
-        case "upload_file": {
-          const result = await uploadFile(
-            (args as any).filename,
-            (args as any).content,
-            (args as any).libraryName,
-            (args as any).isBase64,
-            (args as any).mimeType
-          );
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-        }
-        case "get_list_items": {
-          const result = await getListItems(
-            (args as any).listName,
-            (args as any).search,
-            (args as any).top
-          );
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-        }
-        case "upload_list_item_image": {
-          const result = await uploadListItemImage(
-            (args as any).listName,
-            (args as any).itemId,
-            (args as any).imageFieldName,
-            (args as any).fileName,
-            (args as any).base64Content,
-            (args as any).mimeType
-          );
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-        }
-        case "create_list": {
-          const result = await createList(
-            (args as any).displayName,
-            (args as any).template,
-            (args as any).description,
-            (args as any).columns
-          );
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-        }
-        case "update_list_item": {
-          const result = await updateListItem(
-            (args as any).listName,
-            (args as any).itemId,
-            (args as any).fields
-          );
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-        }
-        case "delete_list_item": {
-          const result = await deleteListItem(
-            (args as any).listName,
-            (args as any).itemId
-          );
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-        }
-        case "delete_file": {
-          const result = await deleteFile(
-            (args as any).libraryName,
-            (args as any).fileId
-          );
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-        }
-        default:
-          throw new Error(`Unknown tool: ${name}`);
-      }
+      const result = await executeTool(name, args as any);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err: any) {
       const graphError = err?.response?.data
         ? JSON.stringify(err.response.data)
@@ -214,6 +112,27 @@ async function main() {
 
   app.get("/mcp", (_req, res) => {
     res.status(405).json({ error: "Method not allowed" });
+  });
+
+  // ── /chat — simple REST endpoint for the Next.js frontend ───────────────────
+  // The frontend doesn't speak the MCP transport protocol, so this wraps the
+  // same tools in a plain request/response shape: POST { messages } -> { reply }.
+  // Protected by the same shared secret as /mcp.
+  app.post("/chat", mcpAuthMiddleware, async (req: Request, res: Response) => {
+    try {
+      const messages: ChatMessage[] = req.body?.messages;
+      if (!Array.isArray(messages) || messages.length === 0) {
+        res.status(400).json({ error: "messages array is required." });
+        return;
+      }
+
+      const reply = await runChatAgent(messages);
+      res.json({ reply });
+    } catch (err: any) {
+      console.error("Error handling /chat request:", err);
+      const message = err?.message || "Internal server error";
+      res.status(500).json({ error: message });
+    }
   });
 
   app.listen(PORT, () => {
