@@ -8,7 +8,7 @@ import {
 import dotenv from "dotenv";
 
 import { TOOL_SCHEMAS, executeTool } from "./tools/registry.js";
-import { runChatAgent, ChatMessage } from "./chat/agent.js";
+import { runChatAgent, ChatMessage, AgentEvent } from "./chat/agent.js";
 
 dotenv.config();
 
@@ -114,24 +114,37 @@ async function main() {
     res.status(405).json({ error: "Method not allowed" });
   });
 
-  // ── /chat — simple REST endpoint for the Next.js frontend ───────────────────
+  // ── /chat — streaming REST endpoint for the Next.js frontend ────────────────
   // The frontend doesn't speak the MCP transport protocol, so this wraps the
-  // same tools in a plain request/response shape: POST { messages } -> { reply }.
+  // same tools in a plain SSE stream: POST { messages } -> a stream of
+  // { type: "tool_call" | "tool_result" | "token" | "usage" | "done", ... }
+  // events, ending the HTTP response when the agent loop finishes.
   // Protected by the same shared secret as /mcp.
   app.post("/chat", mcpAuthMiddleware, async (req: Request, res: Response) => {
-    try {
-      const messages: ChatMessage[] = req.body?.messages;
-      if (!Array.isArray(messages) || messages.length === 0) {
-        res.status(400).json({ error: "messages array is required." });
-        return;
-      }
+    const messages: ChatMessage[] = req.body?.messages;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      res.status(400).json({ error: "messages array is required." });
+      return;
+    }
 
-      const reply = await runChatAgent(messages);
-      res.json({ reply });
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no", // disable proxy buffering (App Service/nginx)
+    });
+
+    const send = (event: AgentEvent) => {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    try {
+      await runChatAgent(messages, send);
     } catch (err: any) {
-      console.error("Error handling /chat request:", err);
       const message = err?.message || "Internal server error";
-      res.status(500).json({ error: message });
+      send({ type: "done", content: `⚠️ ${message}` } as AgentEvent);
+    } finally {
+      res.end();
     }
   });
 
