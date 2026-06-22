@@ -8,6 +8,7 @@ import { createList, createListToolSchema } from "./createList.js";
 import { updateListItem, updateListItemToolSchema } from "./updateListItem.js";
 import { deleteListItem, deleteListItemToolSchema } from "./deleteListItem.js";
 import { deleteFile, deleteFileToolSchema } from "./deleteFile.js";
+import { summarizeFile, summarizeFileToolSchema } from "./summarizeFile.js";
 
 // Single source of truth for every tool's schema — used by both the raw
 // MCP transport (/mcp) and the OpenAI-style function-calling agent (/chat).
@@ -22,6 +23,7 @@ export const TOOL_SCHEMAS = [
   updateListItemToolSchema,
   deleteListItemToolSchema,
   deleteFileToolSchema,
+  summarizeFileToolSchema,
 ];
 
 /**
@@ -59,6 +61,8 @@ export async function executeTool(name: string, args: any): Promise<any> {
       return deleteListItem(args.listName, args.itemId);
     case "delete_file":
       return deleteFile(args.libraryName, args.fileId);
+    case "summarize_file":
+      return summarizeFile(args.fileId, args.driveId, args.instruction);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

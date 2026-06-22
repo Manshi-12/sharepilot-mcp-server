@@ -9,6 +9,8 @@ import dotenv from "dotenv";
 
 import { TOOL_SCHEMAS, executeTool } from "./tools/registry.js";
 import { runChatAgent, ChatMessage, AgentEvent } from "./chat/agent.js";
+import { getGraphClient } from "./auth/graphClient.js";
+import rateLimit from "express-rate-limit";
 
 dotenv.config();
 
@@ -70,7 +72,15 @@ function createMcpServer(): Server {
         : err.message || String(err);
       const status = err?.response?.status ? ` (HTTP ${err.response.status})` : "";
       return {
-        content: [{ type: "text", text: `Error executing tool "${name}"${status}: ${graphError}` }],
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            code: err?.response?.status || "TOOL_ERROR",
+            message: `Error executing tool "${name}"${status}`,
+            detail: graphError,
+            suggestion: "Check the tool arguments and try again. If the error is 403, verify SharePoint permissions.",
+          }, null, 2)
+        }],
         isError: true,
       };
     }
@@ -83,9 +93,35 @@ async function main() {
   const app = express();
   app.use(express.json());
 
-  // Fix #12 — correct tool count in health check
-  app.get("/", (_req, res) => {
-    res.json({ status: "ok", service: "sharepilot-mcp-server", tools: 10 });
+  const limiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute window
+    max: 60,             // max 60 requests per minute per IP
+    message: { error: "Too many requests. Please wait a moment and try again." },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+  app.use("/mcp", limiter);
+  app.use("/chat", limiter);
+
+  app.get("/", async (_req, res) => {
+    try {
+      const client = await getGraphClient();
+      await client.get(`/sites/${process.env.SITE_ID}`);
+      res.json({
+        status: "ok",
+        service: "sharepilot-mcp-server",
+        tools: TOOL_SCHEMAS.length,
+        sharepoint: "reachable",
+        toolList: TOOL_SCHEMAS.map((t) => t.name),
+      });
+    } catch (err: any) {
+      res.status(503).json({
+        status: "degraded",
+        service: "sharepilot-mcp-server",
+        sharepoint: "unreachable",
+        error: err?.message || "Unknown error",
+      });
+    }
   });
 
   // Fix #1 — auth middleware applied only to /mcp
