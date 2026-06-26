@@ -6,14 +6,13 @@ const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY || "";
 const AZURE_OPENAI_DEPLOYMENT = process.env.AZURE_OPENAI_DEPLOYMENT || "";
 const AZURE_OPENAI_API_VERSION = process.env.AZURE_OPENAI_API_VERSION || "2024-08-01-preview";
 
-const MAX_TOOL_ROUNDS = 6; // hard cap so a confused model can't loop forever
+const MAX_TOOL_ROUNDS = 6;
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
 }
 
-// Convert this server's MCP-style tool schemas into the OpenAI function-calling shape.
 const OPENAI_TOOLS = TOOL_SCHEMAS.map((t) => ({
   type: "function",
   function: {
@@ -42,35 +41,16 @@ function validateConfig() {
   }
 }
 
-async function callAzureOpenAI(messages: any[]) {
-  const url = `${AZURE_OPENAI_ENDPOINT}/openai/deployments/${AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version=${AZURE_OPENAI_API_VERSION}`;
-  const { data } = await axios.post(
-    url,
-    {
-      messages,
-      tools: OPENAI_TOOLS,
-      tool_choice: "auto",
-      temperature: 0.3,
-    },
-    {
-      headers: {
-        "Content-Type": "application/json",
-        "api-key": AZURE_OPENAI_API_KEY,
-      },
-      timeout: 60_000,
-    }
-  );
-  return { message: data.choices[0].message, usage: data.usage };
-}
-
-// Streaming variant — same endpoint, `stream: true`, parsed as SSE chunks from
-// Azure OpenAI itself. Used only for the final round once the model has no
-// more tool calls to make, so the user sees the answer appear token-by-token.
+// ── Single streaming call that handles BOTH tool calls and final text ─────────
+// Streams the response from Azure OpenAI. If the model returns tool calls,
+// they are accumulated from the stream and returned. If it returns text,
+// each token is emitted immediately via onToken so the user sees it live.
 async function streamAzureOpenAI(
   messages: any[],
   onToken: (delta: string) => void
-): Promise<{ content: string; usage: any }> {
+): Promise<{ toolCalls: any[] | null; content: string; usage: any }> {
   const url = `${AZURE_OPENAI_ENDPOINT}/openai/deployments/${AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version=${AZURE_OPENAI_API_VERSION}`;
+
   const response = await axios.post(
     url,
     {
@@ -95,6 +75,9 @@ async function streamAzureOpenAI(
   let usage: any = null;
   let buffer = "";
 
+  // Accumulate tool call deltas — Azure streams them in fragments
+  const toolCallMap: Record<number, { id: string; name: string; arguments: string }> = {};
+
   return new Promise((resolve, reject) => {
     response.data.on("data", (chunk: Buffer) => {
       buffer += chunk.toString("utf8");
@@ -109,29 +92,49 @@ async function streamAzureOpenAI(
 
         try {
           const json = JSON.parse(payload);
-          const delta = json.choices?.[0]?.delta?.content;
-          if (delta) {
-            content += delta;
-            onToken(delta);
+          const delta = json.choices?.[0]?.delta;
+
+          if (delta?.content) {
+            content += delta.content;
+            // Emit each token immediately — no buffering
+            onToken(delta.content);
           }
+
+          // Accumulate tool call fragments
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index ?? 0;
+              if (!toolCallMap[idx]) {
+                toolCallMap[idx] = { id: "", name: "", arguments: "" };
+              }
+              if (tc.id) toolCallMap[idx].id = tc.id;
+              if (tc.function?.name) toolCallMap[idx].name += tc.function.name;
+              if (tc.function?.arguments) toolCallMap[idx].arguments += tc.function.arguments;
+            }
+          }
+
           if (json.usage) usage = json.usage;
         } catch {
-          // Partial/malformed chunk boundary — ignore, next chunk completes it
+          // Partial/malformed chunk — ignore, next chunk completes it
         }
       }
     });
 
-    response.data.on("end", () => resolve({ content, usage }));
+    response.data.on("end", () => {
+      const toolCalls = Object.keys(toolCallMap).length > 0
+        ? Object.values(toolCallMap).map((tc) => ({
+          id: tc.id,
+          function: { name: tc.name, arguments: tc.arguments },
+        }))
+        : null;
+
+      resolve({ toolCalls, content, usage });
+    });
+
     response.data.on("error", (err: Error) => reject(err));
   });
 }
 
-// ── Event shapes sent back over SSE to the caller (the /chat route) ─────────
-// "token"      — one streamed text chunk of the final answer
-// "tool_call"  — the model decided to call a tool, with its parsed arguments
-// "tool_result"— that tool's result (or error), paired to the same call id
-// "usage"      — token usage for one round-trip to Azure OpenAI
-// "done"       — final event, carries the complete assistant message
 export type AgentEvent =
   | { type: "tool_call"; id: string; name: string; arguments: any; round: number }
   | { type: "tool_result"; id: string; name: string; result: any; isError: boolean; round: number }
@@ -139,14 +142,6 @@ export type AgentEvent =
   | { type: "usage"; promptTokens: number; completionTokens: number; totalTokens: number; round: number }
   | { type: "done"; content: string };
 
-/**
- * Runs the full agent loop: sends the conversation to Azure OpenAI, executes
- * any tool calls the model requests against the real SharePoint tools, feeds
- * the results back, and repeats until the model returns a plain-text answer.
- * Emits every step as a real event via `onEvent` so callers can stream
- * progress (tool calls, tool results, token usage, streamed final tokens)
- * to the frontend instead of waiting for one big response at the end.
- */
 export async function runChatAgent(
   history: ChatMessage[],
   onEvent?: (event: AgentEvent) => void
@@ -162,7 +157,12 @@ export async function runChatAgent(
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const isFinalAttempt = round === MAX_TOOL_ROUNDS - 1;
 
-    const { message: assistantMessage, usage } = await callAzureOpenAI(messages);
+    // Single streaming call — tokens flow immediately if it's a text answer,
+    // or tool call fragments are accumulated if the model wants to use a tool.
+    const { toolCalls, content, usage } = await streamAzureOpenAI(
+      messages,
+      (delta) => emit({ type: "token", delta })
+    );
 
     if (usage) {
       emit({
@@ -174,26 +174,30 @@ export async function runChatAgent(
       });
     }
 
-    const toolCalls = assistantMessage.tool_calls;
-
+    // No tool calls → the streamed text IS the final answer
     if (!toolCalls || toolCalls.length === 0) {
-      // Final answer — re-run as a stream so tokens arrive live. Same
-      // `messages` array in, so the model deterministically reproduces the
-      // same answer, just delivered incrementally this time.
-      const streamed = await streamAzureOpenAI(messages, (delta) => emit({ type: "token", delta }));
-      const finalContent = streamed.content || assistantMessage.content || "I couldn't generate a response. Please try again.";
+      const finalContent = content || "I couldn't generate a response. Please try again.";
       emit({ type: "done", content: finalContent });
       return finalContent;
     }
 
-    messages.push(assistantMessage);
+    // Tool calls — push the assistant message with tool_calls, execute each tool
+    messages.push({
+      role: "assistant",
+      content: content || null,
+      tool_calls: toolCalls.map((tc) => ({
+        id: tc.id,
+        type: "function",
+        function: tc.function,
+      })),
+    });
 
     for (const call of toolCalls) {
       let args: any = {};
       try {
         args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
       } catch {
-        // Model produced malformed JSON args — surface that back to it
+        // Malformed JSON args from model
       }
 
       emit({ type: "tool_call", id: call.id, name: call.function.name, arguments: args, round });
@@ -201,12 +205,15 @@ export async function runChatAgent(
       let resultText: string;
       let resultForEvent: any;
       let isError = false;
+
       try {
         const result = await executeTool(call.function.name, args);
         resultText = JSON.stringify(result, null, 2);
         resultForEvent = result;
       } catch (err: any) {
-        const graphError = err?.response?.data ? JSON.stringify(err.response.data) : err.message || String(err);
+        const graphError = err?.response?.data
+          ? JSON.stringify(err.response.data)
+          : err.message || String(err);
         resultText = `Error executing tool "${call.function.name}": ${graphError}`;
         resultForEvent = { error: graphError };
         isError = true;
