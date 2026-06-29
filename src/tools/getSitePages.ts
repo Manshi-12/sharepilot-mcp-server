@@ -5,16 +5,15 @@ const SITE_ID = process.env.SITE_ID || "";
 export const getSitePagesToolSchema = {
   name: "get_site_pages",
   description:
-    "Returns all pages and news posts published on this SharePoint site. " +
-    "Shows title, type (Page or News), author, and a direct link. " +
-    "Use when the user asks about site pages, news posts, or what's been published.",
+    "Returns all pages and news posts on this SharePoint site. " +
+    "Use when the user asks about site pages, news posts, or what's published.",
   inputSchema: {
     type: "object",
     properties: {
       type: {
         type: "string",
         enum: ["all", "news", "pages"],
-        description: "Filter: 'news' for news posts only, 'pages' for site pages only, 'all' for both. Defaults to 'all'.",
+        description: "Filter: 'news', 'pages', or 'all'. Defaults to 'all'.",
       },
     },
     required: [],
@@ -24,19 +23,18 @@ export const getSitePagesToolSchema = {
 export async function getSitePages(type: "all" | "news" | "pages" = "all") {
   const client = await getGraphClient();
 
-  // Minimal $select — only fields that exist on baseSitePage
+  // Use no $select at all — let Graph return default fields to avoid property errors
   const res = await client.get(`/sites/${SITE_ID}/pages`, {
-    params: {
-      $select: "id,title,webUrl,createdDateTime,lastModifiedDateTime,promotionKind",
-      $top: 50,
-      $orderby: "lastModifiedDateTime desc",
-    },
+    params: { $top: 50, $orderby: "lastModifiedDateTime desc" },
   });
 
   let pages = (res.data.value || []).map((p: any) => ({
     id: p.id,
-    title: p.title || "Untitled",
-    type: p.promotionKind === "newsPost" ? "News" : "Page",
+    title: p.title || p.name || "Untitled",
+    // promotionKind may not exist on older API versions — use odata type instead
+    type: (p["@odata.type"] || "").includes("NewsLinkPage") || p.promotionKind === "newsPost"
+      ? "News"
+      : "Page",
     lastModified: p.lastModifiedDateTime || p.createdDateTime || null,
     webUrl: p.webUrl,
   }));

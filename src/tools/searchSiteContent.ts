@@ -1,7 +1,5 @@
 import { getGraphClient } from "../auth/graphClient.js";
 
-const SITE_ID = process.env.SITE_ID || "";
-
 export const searchSiteContentToolSchema = {
   name: "search_site_content",
   description:
@@ -20,7 +18,7 @@ export const searchSiteContentToolSchema = {
 export async function searchSiteContent(query: string, top: number = 10) {
   const client = await getGraphClient();
 
-  // Search API with application permissions requires a region
+  // No contentSources for driveItem/listItem — region required for app-only
   const res = await client.post(`/search/query`, {
     requests: [
       {
@@ -28,9 +26,7 @@ export async function searchSiteContent(query: string, top: number = 10) {
         query: { queryString: query },
         from: 0,
         size: top,
-        region: "NAM", // Required for app-only auth
-        fields: ["title", "name", "webUrl", "lastModifiedDateTime"],
-        contentSources: [`/sites/${SITE_ID}`],
+        region: "NAM",
       },
     ],
   });
