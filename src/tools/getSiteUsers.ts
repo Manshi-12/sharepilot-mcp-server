@@ -13,43 +13,32 @@ export const getSiteUsersToolSchema = {
 export async function getSiteUsers() {
   const client = await getGraphClient();
 
-  // Fetch ALL lists including hidden ones to find User Information List
-  const res = await client.get(`/sites/${SITE_ID}/lists`, {
-    params: { "$select": "id,name,displayName", "$top": 200 },
-  });
+  // Correct Graph endpoint for site members — no hidden list needed
+  const res = await client.get(`/sites/${SITE_ID}/permissions`);
+  const permissions = res.data.value || [];
 
-  const allLists = res.data.value || [];
+  const userMap = new Map<string, { name: string; email: string | null; role: string }>();
 
-  // Try multiple possible names/slugs across tenant languages
-  const userList = allLists.find((l: any) =>
-    ["users", "user information list", "userinformationlist"].includes(
-      (l.name || "").toLowerCase()
-    ) ||
-    ["users", "user information list", "userinformationlist"].includes(
-      (l.displayName || "").toLowerCase()
-    )
-  );
+  for (const perm of permissions) {
+    const roles: string[] = perm.roles || [];
+    const role = roles.includes("owner") ? "Owner" : roles.includes("write") ? "Member" : "Visitor";
 
-  if (!userList) {
-    // Last resort: dump list names for debugging
-    const names = allLists.map((l: any) => `${l.name} / ${l.displayName}`).join(", ");
-    throw new Error(`Could not find User Information List. Lists found: ${names}`);
+    const identities = [
+      ...(perm.grantedToV2?.user ? [perm.grantedToV2.user] : []),
+      ...((perm.grantedToIdentitiesV2 || []).map((i: any) => i.user).filter(Boolean)),
+    ];
+
+    for (const user of identities) {
+      if (user?.displayName) {
+        userMap.set(user.displayName, {
+          name: user.displayName,
+          email: user.email || null,
+          role,
+        });
+      }
+    }
   }
 
-  const itemsRes = await client.get(`/sites/${SITE_ID}/lists/${userList.id}/items`, {
-    params: {
-      "$expand": "fields($select=Title,EMail,IsSiteAdmin)",
-      "$top": 500,
-    },
-  });
-
-  const users = (itemsRes.data.value || [])
-    .filter((u: any) => u.fields?.Title && u.fields?.EMail)
-    .map((u: any) => ({
-      name: u.fields.Title,
-      email: u.fields.EMail,
-      isAdmin: u.fields.IsSiteAdmin || false,
-    }));
-
+  const users = Array.from(userMap.values());
   return { totalUsers: users.length, users };
 }
