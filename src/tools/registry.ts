@@ -10,6 +10,13 @@ import { deleteListItem, deleteListItemToolSchema } from "./deleteListItem.js";
 import { deleteFile, deleteFileToolSchema } from "./deleteFile.js";
 import { summarizeFile, summarizeFileToolSchema } from "./summarizeFile.js";
 import { getAllLists, getAllListsToolSchema } from "./getAllLists.js";
+import { getListItemById, getListItemByIdToolSchema } from "./getListItemById.js";
+import { getFileVersions, getFileVersionsToolSchema } from "./getFileVersions.js";
+import { getSiteUsers, getSiteUsersToolSchema } from "./getSiteUsers.js";
+import { getListColumns, getListColumnsToolSchema } from "./getListColumns.js";
+import { moveFile, moveFileToolSchema } from "./moveFile.js";
+import { copyFile, copyFileToolSchema } from "./copyFile.js";
+import { renameFile, renameFileToolSchema } from "./renameFile.js";
 
 // Single source of truth for every tool's schema — used by both the raw
 // MCP transport (/mcp) and the OpenAI-style function-calling agent (/chat).
@@ -26,6 +33,13 @@ export const TOOL_SCHEMAS = [
   deleteFileToolSchema,
   summarizeFileToolSchema,
   getAllListsToolSchema,
+  getListItemByIdToolSchema,
+  getFileVersionsToolSchema,
+  getSiteUsersToolSchema,
+  getListColumnsToolSchema,
+  moveFileToolSchema,
+  copyFileToolSchema,
+  renameFileToolSchema,
 ];
 
 /**
@@ -67,6 +81,20 @@ export async function executeTool(name: string, args: any): Promise<any> {
       return deleteFile(args.libraryName, args.fileId);
     case "summarize_file":
       return summarizeFile(args.fileId, args.driveId, args.instruction);
+    case "get_list_item_by_id":
+      return getListItemById(args.listName, args.itemId);
+    case "get_file_versions":
+      return getFileVersions(args.libraryName, args.fileId);
+    case "get_site_users":
+      return getSiteUsers();
+    case "get_list_columns":
+      return getListColumns(args.listName);
+    case "move_file":
+      return moveFile(args.fileId, args.sourceLibraryName, args.destinationLibraryName, args.fileName);
+    case "copy_file":
+      return copyFile(args.fileId, args.sourceLibraryName, args.destinationLibraryName, args.fileName);
+    case "rename_file":
+      return renameFile(args.fileId, args.libraryName, args.newFileName);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
