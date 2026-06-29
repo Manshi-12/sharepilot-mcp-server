@@ -17,6 +17,8 @@ import { getListColumns, getListColumnsToolSchema } from "./getListColumns.js";
 import { moveFile, moveFileToolSchema } from "./moveFile.js";
 import { copyFile, copyFileToolSchema } from "./copyFile.js";
 import { renameFile, renameFileToolSchema } from "./renameFile.js";
+import { getSitePages, getSitePagesToolSchema } from "./getSitePages.js";
+import { searchSiteContent, searchSiteContentToolSchema } from "./searchSiteContent.js";
 
 // Single source of truth for every tool's schema — used by both the raw
 // MCP transport (/mcp) and the OpenAI-style function-calling agent (/chat).
@@ -40,6 +42,8 @@ export const TOOL_SCHEMAS = [
   moveFileToolSchema,
   copyFileToolSchema,
   renameFileToolSchema,
+  getSitePagesToolSchema,
+  searchSiteContentToolSchema,
 ];
 
 /**
@@ -95,6 +99,10 @@ export async function executeTool(name: string, args: any): Promise<any> {
       return copyFile(args.fileId, args.sourceLibraryName, args.destinationLibraryName, args.fileName);
     case "rename_file":
       return renameFile(args.fileId, args.libraryName, args.newFileName);
+    case "get_site_pages":
+      return getSitePages(args.type);
+    case "search_site_content":
+      return searchSiteContent(args.query, args.top);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
