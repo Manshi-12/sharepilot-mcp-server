@@ -12,7 +12,6 @@ import { summarizeFile, summarizeFileToolSchema } from "./summarizeFile.js";
 import { getAllLists, getAllListsToolSchema } from "./getAllLists.js";
 import { getListItemById, getListItemByIdToolSchema } from "./getListItemById.js";
 import { getFileVersions, getFileVersionsToolSchema } from "./getFileVersions.js";
-import { getSiteUsers, getSiteUsersToolSchema } from "./getSiteUsers.js";
 import { getListColumns, getListColumnsToolSchema } from "./getListColumns.js";
 import { moveFile, moveFileToolSchema } from "./moveFile.js";
 import { copyFile, copyFileToolSchema } from "./copyFile.js";
@@ -37,7 +36,6 @@ export const TOOL_SCHEMAS = [
   getAllListsToolSchema,
   getListItemByIdToolSchema,
   getFileVersionsToolSchema,
-  getSiteUsersToolSchema,
   getListColumnsToolSchema,
   moveFileToolSchema,
   copyFileToolSchema,
@@ -89,8 +87,6 @@ export async function executeTool(name: string, args: any): Promise<any> {
       return getListItemById(args.listName, args.itemId);
     case "get_file_versions":
       return getFileVersions(args.libraryName, args.fileId);
-    case "get_site_users":
-      return getSiteUsers();
     case "get_list_columns":
       return getListColumns(args.listName);
     case "move_file":
