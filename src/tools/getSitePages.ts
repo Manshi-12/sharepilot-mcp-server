@@ -7,7 +7,7 @@ export const getSitePagesToolSchema = {
   description:
     "Returns all pages and news posts published on this SharePoint site. " +
     "Shows title, type (Page or News), author, and a direct link. " +
-    "Use when the user asks about site pages, news posts, announcements, or what's been published.",
+    "Use when the user asks about site pages, news posts, or what's been published.",
   inputSchema: {
     type: "object",
     properties: {
@@ -24,9 +24,10 @@ export const getSitePagesToolSchema = {
 export async function getSitePages(type: "all" | "news" | "pages" = "all") {
   const client = await getGraphClient();
 
+  // Minimal $select — only fields that exist on baseSitePage
   const res = await client.get(`/sites/${SITE_ID}/pages`, {
     params: {
-      $select: "id,title,webUrl,createdDateTime,lastModifiedDateTime,promotionKind,createdBy",
+      $select: "id,title,webUrl,createdDateTime,lastModifiedDateTime,promotionKind",
       $top: 50,
       $orderby: "lastModifiedDateTime desc",
     },
@@ -36,9 +37,7 @@ export async function getSitePages(type: "all" | "news" | "pages" = "all") {
     id: p.id,
     title: p.title || "Untitled",
     type: p.promotionKind === "newsPost" ? "News" : "Page",
-    author: p.createdBy?.user?.displayName || "Unknown",
-    createdAt: p.createdDateTime || null,
-    lastModified: p.lastModifiedDateTime || null,
+    lastModified: p.lastModifiedDateTime || p.createdDateTime || null,
     webUrl: p.webUrl,
   }));
 
