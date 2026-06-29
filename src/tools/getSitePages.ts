@@ -6,7 +6,7 @@ export const getSitePagesToolSchema = {
   name: "get_site_pages",
   description:
     "Returns all pages and news posts published on this SharePoint site. " +
-    "Shows title, type (Page or News), author, published date, and a direct link. " +
+    "Shows title, type (Page or News), author, and a direct link. " +
     "Use when the user asks about site pages, news posts, announcements, or what's been published.",
   inputSchema: {
     type: "object",
@@ -14,7 +14,7 @@ export const getSitePagesToolSchema = {
       type: {
         type: "string",
         enum: ["all", "news", "pages"],
-        description: "Filter by type: 'news' for news posts only, 'pages' for site pages only, 'all' for both. Defaults to 'all'.",
+        description: "Filter: 'news' for news posts only, 'pages' for site pages only, 'all' for both. Defaults to 'all'.",
       },
     },
     required: [],
@@ -24,23 +24,21 @@ export const getSitePagesToolSchema = {
 export async function getSitePages(type: "all" | "news" | "pages" = "all") {
   const client = await getGraphClient();
 
-  const res = await client.get(
-    `/sites/${SITE_ID}/pages`,
-    {
-      params: {
-        $select: "id,title,webUrl,publishedDateTime,createdDateTime,promotionKind,createdBy",
-        $top: 50,
-        $orderby: "lastModifiedDateTime desc",
-      },
-    }
-  );
+  const res = await client.get(`/sites/${SITE_ID}/pages`, {
+    params: {
+      $select: "id,title,webUrl,createdDateTime,lastModifiedDateTime,promotionKind,createdBy",
+      $top: 50,
+      $orderby: "lastModifiedDateTime desc",
+    },
+  });
 
   let pages = (res.data.value || []).map((p: any) => ({
     id: p.id,
     title: p.title || "Untitled",
     type: p.promotionKind === "newsPost" ? "News" : "Page",
     author: p.createdBy?.user?.displayName || "Unknown",
-    publishedAt: p.publishedDateTime || p.createdDateTime || null,
+    createdAt: p.createdDateTime || null,
+    lastModified: p.lastModifiedDateTime || null,
     webUrl: p.webUrl,
   }));
 
