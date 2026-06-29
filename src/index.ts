@@ -146,8 +146,18 @@ async function main() {
     }
   });
 
-  app.get("/mcp", (_req, res) => {
-    res.status(405).json({ error: "Method not allowed" });
+  app.get("/mcp", mcpAuthMiddleware, async (req, res) => {
+    try {
+      const server = createMcpServer();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+      });
+      res.on("close", () => { transport.close(); server.close(); });
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // ── /chat — streaming REST endpoint for the Next.js frontend ────────────────
