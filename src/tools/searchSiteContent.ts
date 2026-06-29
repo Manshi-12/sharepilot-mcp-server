@@ -26,7 +26,7 @@ export async function searchSiteContent(query: string, top: number = 10) {
         query: { queryString: query },
         from: 0,
         size: top,
-        region: "NAM",
+        region: "IND",
       },
     ],
   });

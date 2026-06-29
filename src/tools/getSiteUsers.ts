@@ -13,25 +13,33 @@ export const getSiteUsersToolSchema = {
 export async function getSiteUsers() {
   const client = await getGraphClient();
 
-  // Use SharePoint siteUsers endpoint — no Group.Read.All needed
+  // Fetch ALL lists including hidden ones to find User Information List
   const res = await client.get(`/sites/${SITE_ID}/lists`, {
-    params: { "$select": "id,name", "$top": 100 },
+    params: { "$select": "id,name,displayName", "$top": 200 },
   });
 
-  // Find the hidden "users" list (User Information List internal name is always "users")
-  const userList = (res.data.value || []).find(
-    (l: any) => l.name === "users"
+  const allLists = res.data.value || [];
+
+  // Try multiple possible names/slugs across tenant languages
+  const userList = allLists.find((l: any) =>
+    ["users", "user information list", "userinformationlist"].includes(
+      (l.name || "").toLowerCase()
+    ) ||
+    ["users", "user information list", "userinformationlist"].includes(
+      (l.displayName || "").toLowerCase()
+    )
   );
 
   if (!userList) {
-    throw new Error("Could not locate the User Information List on this site.");
+    // Last resort: dump list names for debugging
+    const names = allLists.map((l: any) => `${l.name} / ${l.displayName}`).join(", ");
+    throw new Error(`Could not find User Information List. Lists found: ${names}`);
   }
 
   const itemsRes = await client.get(`/sites/${SITE_ID}/lists/${userList.id}/items`, {
     params: {
-      "$expand": "fields($select=Title,EMail,IsSiteAdmin,UserExpiration)",
+      "$expand": "fields($select=Title,EMail,IsSiteAdmin)",
       "$top": 500,
-      "$filter": "fields/ContentType eq 'Person'",
     },
   });
 
