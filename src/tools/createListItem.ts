@@ -3,6 +3,7 @@ import { resolveList, getListColumns, findColumn, resolvePersonId, ColumnInfo } 
 import { coerceValue } from "../utils/coerce.js";
 
 const SITE_ID = process.env.SITE_ID || "";
+const SITE_URL = process.env.SITE_URL || "";
 
 export const createListItemToolSchema = {
   name: "create_list_item",
@@ -60,7 +61,9 @@ export async function createListItem(listName: string, fields: Record<string, an
       fields: { Title: titleValue },
     });
     itemId = res.data.id;
-    webUrl = res.data.webUrl;
+    webUrl = SITE_URL
+      ? `${SITE_URL.replace(/\/$/, "")}/Lists/${list.name}/DispForm.aspx?ID=${itemId}`
+      : res.data.webUrl;
   } catch (e: any) {
     throw new Error(
       `Could not create the item (failed even with just Title set): ` +

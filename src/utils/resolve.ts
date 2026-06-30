@@ -196,6 +196,33 @@ export async function resolvePersonId(client: AxiosInstance, nameOrEmail: string
     for (const [id, name] of map.entries()) {
       if (name.toLowerCase().includes(key)) return id;
     }
+
+    // Fallback — user not yet in site's User Information List (never visited
+    // the site). Look them up in Azure AD directory, then "ensure" them on
+    // the site via SharePoint's EnsureUser endpoint so they get a real ID.
+    const aadRes = await client.get(`/users`, {
+      params: {
+        "$filter": `startswith(displayName,'${nameOrEmail}') or startswith(mail,'${nameOrEmail}')`,
+        "$select": "id,displayName,mail,userPrincipalName",
+        "$top": 1,
+      },
+    });
+
+    const aadUser = aadRes.data.value?.[0];
+    if (!aadUser) return null;
+
+    const loginName = aadUser.mail || aadUser.userPrincipalName;
+    const ensureRes = await client.post(
+      `/sites/${SITE_ID}/lists/${await getUserInfoListId(client)}/items`,
+      { fields: { Title: aadUser.displayName, EMail: loginName } }
+    ).catch(() => null);
+
+    if (ensureRes?.data?.id) {
+      const newId = Number(ensureRes.data.id);
+      userMapCache = null; // invalidate cache so next call picks up the new user
+      return newId;
+    }
+
     return null;
   } catch {
     return null;
