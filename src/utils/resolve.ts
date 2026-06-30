@@ -34,7 +34,7 @@ let listCache: CacheEntry<ListInfo[]> | null = null;
 const columnCache = new Map<string, CacheEntry<ColumnInfo[]>>();
 
 // Fix #9 — cache the user map so we don't fetch 2000 users on every person field
-let userMapCache: CacheEntry<Map<number, string>> | null = null;
+let userMapCache: CacheEntry<Map<number, { name: string; email: string }>> | null = null;
 
 export function normalizeKey(s: string): string {
   return s.trim().toLowerCase().replace(/[\s_-]+/g, "");
@@ -165,7 +165,7 @@ async function getUserInfoListId(client: AxiosInstance): Promise<string> {
 }
 
 // Fix #9 — build user map once and cache it for 5 minutes
-export async function getUserMap(client: AxiosInstance): Promise<Map<number, string>> {
+export async function getUserMap(client: AxiosInstance): Promise<Map<number, { name: string; email: string }>> {
   if (userMapCache && userMapCache.expiresAt > Date.now()) return userMapCache.data;
 
   const listId = await getUserInfoListId(client);
@@ -173,11 +173,12 @@ export async function getUserMap(client: AxiosInstance): Promise<Map<number, str
     params: { "$expand": "fields($select=Title,EMail)", "$top": 2000 },
   });
 
-  const map = new Map<number, string>();
+  const map = new Map<number, { name: string; email: string }>();
   for (const u of res.data.value || []) {
     const numId = Number(u.id);
-    const name = u.fields?.Title || u.fields?.EMail || `User ${numId}`;
-    map.set(numId, name);
+    const name = u.fields?.Title || `User ${numId}`;
+    const email = u.fields?.EMail || "";
+    map.set(numId, { name, email });
   }
 
   userMapCache = { data: map, expiresAt: Date.now() + CACHE_TTL_MS };
@@ -189,12 +190,17 @@ export async function resolvePersonId(client: AxiosInstance, nameOrEmail: string
     const map = await getUserMap(client);
     const key = nameOrEmail.trim().toLowerCase();
 
-    for (const [id, name] of map.entries()) {
-      if (name.toLowerCase() === key) return id;
+    // Exact match — name or email
+    for (const [id, u] of map.entries()) {
+      if (u.name.toLowerCase() === key || u.email.toLowerCase() === key) return id;
     }
-    // partial match fallback
-    for (const [id, name] of map.entries()) {
-      if (name.toLowerCase().includes(key)) return id;
+    // Partial match — both directions (key inside name/email, or name/email inside key)
+    for (const [id, u] of map.entries()) {
+      const n = u.name.toLowerCase();
+      const e = u.email.toLowerCase();
+      if (n.includes(key) || key.includes(n) || e.includes(key) || key.includes(e.split("@")[0])) {
+        return id;
+      }
     }
 
     // Fallback — user not yet in site's User Information List (never visited
@@ -202,7 +208,7 @@ export async function resolvePersonId(client: AxiosInstance, nameOrEmail: string
     // the site via SharePoint's EnsureUser endpoint so they get a real ID.
     const aadRes = await client.get(`/users`, {
       params: {
-        "$filter": `startswith(displayName,'${nameOrEmail}') or startswith(mail,'${nameOrEmail}')`,
+        "$filter": `startswith(displayName,'${nameOrEmail}') or startswith(mail,'${nameOrEmail}') or startswith(userPrincipalName,'${nameOrEmail}')`,
         "$select": "id,displayName,mail,userPrincipalName",
         "$top": 1,
       },

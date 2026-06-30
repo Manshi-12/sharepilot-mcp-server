@@ -27,7 +27,7 @@ export const getListItemsToolSchema = {
       },
       top: {
         type: "number",
-        description: "Optional. Maximum number of rows to return. Defaults to 10. Do not request more than 10 initially unless the user explicitly asks.",
+        description: "Optional. Maximum number of rows to return. Defaults to 100.",
       },
     },
     required: ["listName"],
@@ -39,7 +39,7 @@ function buildItemDisplayUrl(listInternalName: string, itemId: string): string {
   return `${SITE_URL}/Lists/${listInternalName}/DispForm.aspx?ID=${itemId}`;
 }
 
-export async function getListItems(listName: string, search?: string, top: number = 10) {
+export async function getListItems(listName: string, search?: string, top: number = 100) {
   const client = await getGraphClient();
 
   const list = await resolveList(client, listName);
@@ -59,7 +59,7 @@ export async function getListItems(listName: string, search?: string, top: numbe
   const rawItems = res.data.value || [];
 
   // Fix #9 — use shared cached getUserMap instead of fetching users inline every time
-  let userMap = new Map<number, string>();
+  let userMap = new Map<number, { name: string; email: string }>();
   try {
     userMap = await getUserMap(client);
   } catch {
@@ -90,11 +90,11 @@ export async function getListItems(listName: string, search?: string, top: numbe
 
         if (col?.type === "personOrGroup") {
           if (typeof value === "number") {
-            cleaned[displayName] = userMap.get(value) ?? `User ${value}`;
+            cleaned[displayName] = userMap.get(value)?.name ?? `User ${value}`;
           } else if (Array.isArray(value)) {
             cleaned[displayName] = value.map((v: any) =>
               typeof v === "number"
-                ? (userMap.get(v) ?? `User ${v}`)
+                ? (userMap.get(v)?.name ?? `User ${v}`)
                 : (v?.LookupValue || v?.Title || String(v))
             );
           } else if (value && typeof value === "object") {
@@ -142,22 +142,18 @@ export async function getListItems(listName: string, search?: string, top: numbe
         viewUrl: displayUrl || item.webUrl,
         fields: cleaned,
       };
-    });
-
-  const filteredItems = items.filter((item: any) => {
-    if (!searchLower) return true;
-    return Object.values(item.fields).some((v) =>
-      String(v ?? "").toLowerCase().includes(searchLower)
-    );
-  });
-
-  const totalMatches = filteredItems.length;
-  const slicedItems = filteredItems.slice(0, top);
+    })
+    .filter((item: any) => {
+      if (!searchLower) return true;
+      return Object.values(item.fields).some((v) =>
+        String(v ?? "").toLowerCase().includes(searchLower)
+      );
+    })
+    .slice(0, top);
 
   return {
     listName: list.displayName,
-    totalMatchCount: totalMatches,
-    returnedCount: slicedItems.length,
-    items: slicedItems,
+    matchCount: items.length,
+    items,
   };
 }
