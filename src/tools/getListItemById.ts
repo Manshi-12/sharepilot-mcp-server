@@ -41,7 +41,7 @@ export async function getListItemById(listName: string, itemId: number) {
   const fields = item.fields || {};
   const cleaned: Record<string, any> = {};
 
-  let userMap = new Map<number, string>();
+  let userMap = new Map<number, { name: string; email: string }>();
   try { userMap = await getUserMap(client); } catch { }
 
   for (const [internalName, value] of Object.entries(fields)) {
@@ -57,10 +57,10 @@ export async function getListItemById(listName: string, itemId: number) {
 
     if (col?.type === "personOrGroup") {
       if (typeof value === "number") {
-        cleaned[displayName] = userMap.get(value) ?? `User ${value}`;
+        cleaned[displayName] = userMap.get(value)?.name ?? `User ${value}`;
       } else if (Array.isArray(value)) {
         cleaned[displayName] = value.map((v: any) =>
-          typeof v === "number" ? (userMap.get(v) ?? `User ${v}`) : (v?.LookupValue || String(v))
+          typeof v === "number" ? (userMap.get(v)?.name ?? `User ${v}`) : (v?.LookupValue || String(v))
         );
       } else {
         cleaned[displayName] = (value as any)?.LookupValue || String(value);
