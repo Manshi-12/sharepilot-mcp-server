@@ -1,5 +1,6 @@
 import axios from "axios";
 import { TOOL_SCHEMAS, executeTool } from "../tools/registry.js";
+import { SYSTEM_PROMPT } from "./systemPrompt.js";
 
 const AZURE_OPENAI_ENDPOINT = (process.env.AZURE_OPENAI_ENDPOINT || "").replace(/\/+$/, "");
 const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY || "";
@@ -21,17 +22,6 @@ const OPENAI_TOOLS = TOOL_SCHEMAS.map((t) => ({
     parameters: t.inputSchema,
   },
 }));
-
-const SYSTEM_PROMPT = `You are SharePilot, an AI assistant embedded in a SharePoint workspace.
-You help the user search files, read documents, manage SharePoint Lists (create/read/update/delete items),
-upload files and images, and create new lists — using the tools available to you.
-
-Guidelines:
-- Always use a tool when the user's request requires looking up or changing real SharePoint data. Never invent file names, list items, or IDs.
-- If a tool call fails, explain what went wrong in plain language and suggest a next step — don't expose raw stack traces.
-- Keep responses concise and conversational. Use bullet points or short lists when returning multiple results.
-- If the request is ambiguous (e.g. which list, which library), ask a clarifying question instead of guessing.
-- When retrieving items from a list, library do not output more than 10 items at a time. If there are more items available, show the first 10 and explicitly ask the user if they would like to see more.`;
 
 function validateConfig() {
   if (!AZURE_OPENAI_ENDPOINT || !AZURE_OPENAI_API_KEY || !AZURE_OPENAI_DEPLOYMENT) {
