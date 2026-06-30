@@ -27,7 +27,7 @@ export const getListItemsToolSchema = {
       },
       top: {
         type: "number",
-        description: "Optional. Maximum number of rows to return. Defaults to 100.",
+        description: "Optional. Maximum number of rows to return. Defaults to 10. Do not request more than 10 initially unless the user explicitly asks.",
       },
     },
     required: ["listName"],
@@ -39,7 +39,7 @@ function buildItemDisplayUrl(listInternalName: string, itemId: string): string {
   return `${SITE_URL}/Lists/${listInternalName}/DispForm.aspx?ID=${itemId}`;
 }
 
-export async function getListItems(listName: string, search?: string, top: number = 100) {
+export async function getListItems(listName: string, search?: string, top: number = 10) {
   const client = await getGraphClient();
 
   const list = await resolveList(client, listName);
@@ -142,18 +142,22 @@ export async function getListItems(listName: string, search?: string, top: numbe
         viewUrl: displayUrl || item.webUrl,
         fields: cleaned,
       };
-    })
-    .filter((item: any) => {
-      if (!searchLower) return true;
-      return Object.values(item.fields).some((v) =>
-        String(v ?? "").toLowerCase().includes(searchLower)
-      );
-    })
-    .slice(0, top);
+    });
+
+  const filteredItems = items.filter((item: any) => {
+    if (!searchLower) return true;
+    return Object.values(item.fields).some((v) =>
+      String(v ?? "").toLowerCase().includes(searchLower)
+    );
+  });
+
+  const totalMatches = filteredItems.length;
+  const slicedItems = filteredItems.slice(0, top);
 
   return {
     listName: list.displayName,
-    matchCount: items.length,
-    items,
+    totalMatchCount: totalMatches,
+    returnedCount: slicedItems.length,
+    items: slicedItems,
   };
 }
